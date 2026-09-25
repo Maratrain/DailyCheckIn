@@ -1,0 +1,11 @@
+# 登录凭证与配置，绝不入库
+config.json
+
+# 运行日志
+logs/
+
+# 扫码登录临时文件
+login_qr.html
+
+__pycache__/
+*.pyc
