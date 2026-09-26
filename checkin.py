@@ -266,6 +266,7 @@ def mi_app_headers(m: dict, body: str) -> dict:
         "cookie": mi_stoken_cookie(m),
         "x-rpc-client_type": "2",
         "x-rpc-app_version": MI_VERSION,
+        "x-rpc-app_id": "bll8iq97cem8",
         "x-rpc-sys_version": "12",
         "x-rpc-channel": "miyousheluodi",
         "x-rpc-device_id": m["device_id"],
@@ -401,24 +402,25 @@ def rsa_encrypt(data: str, b64_der: str) -> str:
 
 
 def mi_sms_headers(device_id: str) -> dict:
-    """短信登录专用请求头（对齐游戏客户端，无需 DS 签名）"""
+    """短信登录专用请求头。
+
+    必须使用米游社渠道（x-rpc-app_id=bll8iq97cem8）：stoken 按签发渠道限定作用域，
+    用其他渠道（如游戏 SDK）登录拿到的 token 米游社接口不认（对齐 starudream/sign-task 实现）。
+    """
     return {
-        "Accept": "*/*",
         "Content-Type": "application/json",
-        "x-rpc-app_id": "c76ync6mutq8",
-        "x-rpc-channel_id": "1",
-        "x-rpc-channel_version": "2.49.0.189",
-        "x-rpc-client_type": "3",
-        "x-rpc-device_fp": "38d814469b1e4",
+        "User-Agent": MI_UA,
+        "Referer": "https://app.mihoyo.com",
+        "x-rpc-app_version": MI_VERSION,
+        "x-rpc-app_id": "bll8iq97cem8",
+        "x-rpc-verify_key": "bll8iq97cem8",
         "x-rpc-device_id": device_id,
-        "x-rpc-device_model": "8BAB",
+        "x-rpc-client_type": "2",
         "x-rpc-device_name": "LAPTOP-TOOL",
-        "x-rpc-game_biz": "hk4e_cn",
-        "x-rpc-language": "zh-cn",
-        "x-rpc-lifecycle_id": str(uuid.uuid4()),
-        "x-rpc-mdk_version": "2.49.0.189",
-        "x-rpc-sdk_version": "2.49.0.189",
-        "x-rpc-sys_version": "Windows%2011",
+        "x-rpc-device_model": "PC",
+        "x-rpc-sys_version": "Android 12",
+        "x-rpc-channel": "miyousheluodi",
+        "x-rpc-device_fp": "38d814469b1e4",
     }
 
 
@@ -439,13 +441,20 @@ def mi_sms_login() -> None:
     enc_phone = rsa_encrypt(mobile, pub_key)
     enc_area = rsa_encrypt("+86", pub_key)
 
-    action_type = ""
+    action_type = "login_by_mobile_captcha"
     send = http_request("POST", MI_SMS_SEND_URL, headers=mi_sms_headers(m["device_id"]),
                         data=json.dumps({"area_code": enc_area, "mobile": enc_phone},
                                         separators=(",", ":")))
     if send.get("retcode") == 0:
-        action_type = (send.get("data") or {}).get("action_type", "")
         log.info("验证码已发送，请查看手机短信")
+    elif send.get("retcode") == -3101:
+        log.info("直接发送验证码需要人机验证，改用网页备用方案：")
+        print("  浏览器打开 https://user.mihoyo.com/#/login → 输入同一手机号 → 完成滑块")
+        print("  验证并点「获取验证码」（不要点登录），收到验证码后回到这里输入")
+        try:
+            os.startfile("https://user.mihoyo.com/#/login")
+        except Exception:
+            pass
     else:
         log.warning(f"直接发送验证码失败（{send.get('retcode')} {send.get('message')}），改用备用方案：")
         print("  浏览器打开 https://user.mihoyo.com/#/login → 输入同一手机号 → 完成滑块")
@@ -604,6 +613,8 @@ def mi_bbs_checkin(m: dict) -> bool:
         code = data.get("retcode")
         if code == 0:
             log.info(f"米游币打卡 [{name}]：成功")
+        elif code == 1008:
+            log.info(f"米游币打卡 [{name}]：今日已打卡")
         elif code == 1034:
             log.warning(f"米游币打卡 [{name}]：触发风控验证码，今天请在 App 里手动打卡一次")
             all_ok = False
