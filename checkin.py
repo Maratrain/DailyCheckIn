@@ -61,6 +61,8 @@ MI_TASKS_URL = "https://bbs-api.miyoushe.com/apihub/wapi/getUserMissionsState"
 MI_BBS_SIGN_URL = "https://bbs-api.miyoushe.com/apihub/app/api/signIn"
 MI_SMS_SEND_URL = "https://passport-api.mihoyo.com/account/ma-cn-verifier/verifier/createLoginCaptcha"
 MI_SMS_LOGIN_URL = "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByMobileCaptcha"
+MI_COOKIE_TOKEN_V2_URL = "https://passport-api.mihoyo.com/account/auth/api/getCookieAccountInfoBySToken"
+MI_PASSPORT_X4_SALT = "xV8v4Qu54lUKrEYFZkJhB8cuOh9Asafs"
 MI_RSA_KEY_URLS = [
     "https://passport-api.mihoyo.com/account/ma-cn-passport/app/getRSAKey",
     "https://passport-api.mihoyo.com/account/ma-cn-passport/app/get_by_rsa_key",
@@ -278,10 +280,52 @@ def mi_app_headers(m: dict, body: str) -> dict:
     }
 
 
+def ds_x4(query: str = "") -> str:
+    """passport 接口专用 DS 签名（x4 salt，DS2 风格）"""
+    t = str(int(time.time()))
+    r = str(random.randint(100000, 200000))
+    return f"{t},{r},{md5(f'salt={MI_PASSPORT_X4_SALT}&t={t}&r={r}&b=&q={query}')}"
+
+
+def mi_exchange_cookie_token(m: dict) -> bool:
+    """新登录的 stoken 换 cookie_token：走 passport 专用接口（对齐 MiyoQian 现网实现）。
+
+    旧接口 api-takumi/auth/api 对刚签发的 stoken 会拒绝（2026-09 收紧），
+    此接口要求 stoken 同时出现在查询参数与 cookie 中，并携带 DS(x4) 签名。
+    """
+    query = f"stoken={m['stoken']}"
+    headers = {
+        "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) miHoYoBBS/{MI_VERSION}",
+        "x-rpc-app_version": MI_VERSION,
+        "x-rpc-client_type": "2",
+        "x-requested-with": "com.mihoyo.hyperion",
+        "Referer": "https://webstatic.mihoyo.com",
+        "x-rpc-device_id": m["device_id"],
+        "x-rpc-device_fp": "38d814469b1e4",
+        "cookie": f"mid={m['mid']};stoken={m['stoken']}",
+        "ds": ds_x4(query),
+        "x-rpc-aigis": "",
+    }
+    data = http_request("GET", MI_COOKIE_TOKEN_V2_URL, headers=headers,
+                        params={"stoken": m["stoken"]})
+    if data.get("retcode") == 0 and data.get("data", {}).get("cookie_token"):
+        m["cookie_token"] = data["data"]["cookie_token"]
+        if not m.get("account_id"):
+            m["account_id"] = m.get("stuid", "")
+        save_config(CONFIG)
+        log.info("米游社 cookie_token 已通过 passport 接口兑换成功")
+        return True
+    log.warning(f"passport 兑换 cookie_token 失败：{data.get('retcode')} {data.get('message')}")
+    return False
+
+
 def mi_refresh_cookie_token(m: dict) -> bool:
-    """用 stoken 换新的 cookie_token"""
+    """用 stoken 换新的 cookie_token：先走 passport 兑换接口，失败回退旧接口"""
     if not m.get("stoken"):
         return False
+    if mi_exchange_cookie_token(m):
+        return True
+    # 回退：旧接口（对已建立会话的 stoken 通常有效）
     data = http_request("GET", MI_COOKIE_TOKEN_URL,
                         headers={"Accept": "application/json",
                                  "Cookie": mi_stoken_cookie(m)})
@@ -292,7 +336,7 @@ def mi_refresh_cookie_token(m: dict) -> bool:
         save_config(CONFIG)
         log.info("米游社 cookie_token 已自动刷新")
         return True
-    log.warning("米游社 stoken 已失效，请重新执行 python checkin.py login 扫码登录")
+    log.warning(f"cookie_token 续期失败：{data.get('retcode')} {data.get('message')}")
     return False
 
 
@@ -425,9 +469,13 @@ def mi_sms_login() -> None:
         m["stuid"] = str(info["aid"])
         m["mid"] = str(info["mid"])
         m["account_id"] = m["stuid"]
+        # 先保存 stoken 再兑换 cookie_token，避免兑换失败时丢弃登录成果
+        save_config(CONFIG)
+        log.info(f"米游社短信登录成功！stoken 已保存（uid={m['stuid']}，前缀 {m['stoken'][:4]}...）")
         if mi_refresh_cookie_token(m):
-            save_config(CONFIG)
-            log.info(f"米游社短信登录成功！uid={m['stuid']}（米游币打卡与游戏签到全部可用）")
+            log.info("米游币打卡与游戏签到全部可用")
+        else:
+            log.warning("cookie_token 暂未换出：米游币打卡不受影响，游戏签到会在运行时自动重试")
     else:
         log.error(f"短信登录失败：{result.get('retcode')} {result.get('message')}"
                   f"（验证码 5 分钟内有效，可重试）")
@@ -675,14 +723,16 @@ def mihoyo_run() -> bool:
     if not m["stoken"]:
         log.warning("米游社尚未登录（缺少 stoken），请先执行：python checkin.py login")
         return False
-    if not mi_ensure_web_auth(m):
-        log.error("米游社网页端登录态不可用，请重新执行：python checkin.py login")
-        return False
 
     ok = True
+    # 米游币打卡只依赖 stoken，放在最前且不依赖网页端登录态
     if m["bbs_checkin"]:
         ok = mi_bbs_checkin(m) and ok
-    ok = mi_game_sign(m) and ok
+    if mi_ensure_web_auth(m):
+        ok = mi_game_sign(m) and ok
+    else:
+        log.error("米游社网页端登录态不可用，本次跳过游戏签到（cookie_token 会在下次运行时自动重试）")
+        ok = False
     return ok
 
 
