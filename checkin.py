@@ -157,6 +157,7 @@ def setup_logging() -> None:
 
 def load_config() -> dict:
     default = {
+        "proxy": "",
         "mihoyo": {
             "enabled": True,
             "device_id": "",
@@ -177,6 +178,9 @@ def load_config() -> dict:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             saved = json.load(f)
         for section, values in default.items():
+            if not isinstance(values, dict):
+                saved.setdefault(section, values)
+                continue
             saved.setdefault(section, {})
             for key, val in values.items():
                 saved[section].setdefault(key, val)
@@ -189,17 +193,37 @@ def save_config(cfg: dict) -> None:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
+# 统一使用的会话：忽略系统/环境变量代理（米哈游与库街区均为国内接口，
+# 走代理容易被墙外节点拖死导致长时间无响应）；如需代理可在 config.json 配 proxy 字段
+SESSION = requests.Session()
+SESSION.trust_env = False
+
+
+def _current_proxy() -> str:
+    try:
+        return CONFIG.get("proxy", "") or ""
+    except NameError:
+        return ""
+
+
 def http_request(method: str, url: str, **kwargs) -> dict:
-    """带重试的请求，返回 JSON dict；网络异常时返回 {"retcode": -1, "message": ...}"""
-    kwargs.setdefault("timeout", TIMEOUT)
-    for attempt in range(3):
+    """带重试的请求，返回 JSON dict；网络异常时返回 {"retcode": -1, "message": ...}
+
+    timeout 为 (连接, 读取) 二元组：连接 7 秒快速失败，避免网络异常时长时间静默。
+    """
+    kwargs.setdefault("timeout", (7, TIMEOUT))
+    proxy = _current_proxy()
+    if proxy:
+        kwargs["proxies"] = {"http": proxy, "https": proxy}
+    for attempt in range(1, 4):
         try:
-            resp = requests.request(method, url, **kwargs)
+            resp = SESSION.request(method, url, **kwargs)
             return resp.json()
         except (requests.RequestException, json.JSONDecodeError) as e:
-            if attempt == 2:
-                log.warning(f"请求失败 {url}：{e}")
+            if attempt == 3:
+                log.warning(f"请求失败（已重试 3 次）{url}：{e}")
                 return {"retcode": -1, "message": str(e)}
+            log.warning(f"请求异常（第 {attempt} 次），3 秒后重试：{type(e).__name__}: {e}")
             time.sleep(3)
 
 
@@ -298,7 +322,7 @@ def mi_fetch_rsa_key() -> str:
     """获取 RSA 公钥（base64 DER）：先尝试服务端，失败用内置公钥"""
     for url in MI_RSA_KEY_URLS:
         try:
-            resp = requests.get(url, timeout=10)
+            resp = SESSION.get(url, timeout=10)
             j = resp.json()
             data = j.get("data") or {}
             key = data.get("public_key") or data.get("rsa_key") or j.get("public_key") or j.get("rsa_key")
@@ -510,8 +534,10 @@ def mi_ensure_web_auth(m: dict) -> bool:
     注意：每次换取 cookie_token 都会使旧 token 作废（服务端单活轮换），
     因此不要在无关流程里调用换取接口，续期后稍等片刻再重试。
     """
+    log.info("正在检查米游社登录态...")
     if m.get("cookie_token") and mi_roles_call(m).get("retcode") == 0:
         return True
+    log.info("cookie_token 无效，尝试用 stoken 续期...")
     if not mi_refresh_cookie_token(m):
         return False
     time.sleep(2)
@@ -523,6 +549,7 @@ def mi_bbs_checkin(m: dict) -> bool:
     all_ok = True
     for gid in m["bbs_gids"]:
         name = MI_BBS_PARTITIONS.get(str(gid), f"分区{gid}")
+        log.info(f"正在米游币打卡 [{name}]...")
         body = json.dumps({"gids": str(gid)}, separators=(",", ":"))
         data = http_request("POST", MI_BBS_SIGN_URL,
                             headers=mi_app_headers(m, body), data=body)
@@ -569,6 +596,7 @@ def mi_game_sign(m: dict) -> bool:
             log.warning(f"未知游戏配置项：{game_key}，已跳过")
             continue
         name = game["name"]
+        log.info(f"正在检查 {name} 签到...")
 
         roles_data = http_request("GET", MI_ROLES_URL,
                                   headers=mi_web_headers(m),
@@ -754,6 +782,7 @@ def kuro_sign() -> bool:
         log.warning("库街区尚未登录（缺少 token），请先执行：python checkin.py login")
         return False
 
+    log.info("正在检查库街区登录态...")
     mine = kuro_request(KURO_MINE_URL, kuro_user_headers(k), {})
     if mine.get("code") == 220:
         log.error("库街区 token 已过期，请重新执行：python checkin.py login")
@@ -776,6 +805,7 @@ def kuro_sign() -> bool:
             log.warning(f"未知库街区游戏配置项：{game_key}，已跳过")
             continue
         name = game["name"]
+        log.info(f"正在处理库街区 {name} 每日补给...")
 
         roles = kuro_request(KURO_ROLE_LIST_URL, kuro_user_headers(k),
                              {"gameId": game["game_id"]})
