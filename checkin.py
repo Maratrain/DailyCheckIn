@@ -17,6 +17,7 @@
 """
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -58,17 +59,29 @@ MI_COOKIE_TOKEN_URL = "https://api-takumi.mihoyo.com/auth/api/getCookieAccountIn
 MI_ROLES_URL = "https://api-takumi.mihoyo.com/binding/api/getUserGameRolesByCookie"
 MI_TASKS_URL = "https://bbs-api.miyoushe.com/apihub/wapi/getUserMissionsState"
 MI_BBS_SIGN_URL = "https://bbs-api.miyoushe.com/apihub/app/api/signIn"
+MI_SMS_SEND_URL = "https://passport-api.mihoyo.com/account/ma-cn-verifier/verifier/createLoginCaptcha"
+MI_SMS_LOGIN_URL = "https://passport-api.mihoyo.com/account/ma-cn-passport/app/loginByMobileCaptcha"
+MI_RSA_KEY_URLS = [
+    "https://passport-api.mihoyo.com/account/ma-cn-passport/app/getRSAKey",
+    "https://passport-api.mihoyo.com/account/ma-cn-passport/app/get_by_rsa_key",
+    "https://passport-api.mihoyo.com/account/ma-cn-passport/web/rsa_public_key",
+]
 
 # 游戏签到：act_id 来自 MihoyoBBSTools setting.py，base 为官方签到活动域名
+# extra_headers：米哈游对原神(hk4e)/绝区零(zzz)的签到接口校验专属请求头，缺失会报 -500001
 MI_GAMES = {
     "genshin": {"name": "原神", "biz": "hk4e_cn", "act_id": "e202311201442471",
-                "base": "https://api-takumi.mihoyo.com/event/luna"},
+                "base": "https://api-takumi.mihoyo.com/event/luna",
+                "extra_headers": {"x-rpc-signgame": "hk4e"}},
     "honkaisr": {"name": "崩坏：星穹铁道", "biz": "hkrpg_cn", "act_id": "e202304121516551",
-                 "base": "https://api-takumi.mihoyo.com/event/luna"},
+                 "base": "https://api-takumi.mihoyo.com/event/luna",
+                 "extra_headers": {}},
     "zzz": {"name": "绝区零", "biz": "nap_cn", "act_id": "e202406242138391",
-            "base": "https://act-nap-api.mihoyo.com/event/luna/zzz"},
+            "base": "https://act-nap-api.mihoyo.com/event/luna/zzz",
+            "extra_headers": {"x-rpc-signgame": "zzz"}},
     "honkai3rd": {"name": "崩坏3", "biz": "bh3_cn", "act_id": "e202306201626331",
-                  "base": "https://api-takumi.mihoyo.com/event/luna"},
+                  "base": "https://api-takumi.mihoyo.com/event/luna",
+                  "extra_headers": {}},
 }
 
 # 米游币打卡分区（id 与名称来自 MihoyoBBSTools mihoyobbs_List）
@@ -200,7 +213,8 @@ def mi_stoken_cookie(m: dict) -> str:
 
 
 def mi_web_cookie(m: dict) -> str:
-    return f"account_id={m['account_id']};cookie_token={m['cookie_token']}"
+    account_id = m.get("account_id") or m.get("stuid", "")
+    return f"account_id={account_id};cookie_token={m['cookie_token']}"
 
 
 def mi_web_headers(m: dict) -> dict:
@@ -249,6 +263,8 @@ def mi_refresh_cookie_token(m: dict) -> bool:
                                  "Cookie": mi_stoken_cookie(m)})
     if data.get("retcode") == 0 and data.get("data", {}).get("cookie_token"):
         m["cookie_token"] = data["data"]["cookie_token"]
+        if not m.get("account_id"):
+            m["account_id"] = m.get("stuid", "")
         save_config(CONFIG)
         log.info("米游社 cookie_token 已自动刷新")
         return True
@@ -256,8 +272,149 @@ def mi_refresh_cookie_token(m: dict) -> bool:
     return False
 
 
+def _der_read(data: bytes, idx: int):
+    """读取单个 DER TLV 节点，返回 (tag, value, 下一节点偏移)"""
+    tag = data[idx]
+    idx += 1
+    length = data[idx]
+    idx += 1
+    if length & 0x80:
+        num = length & 0x7F
+        length = int.from_bytes(data[idx:idx + num], "big")
+        idx += num
+    return tag, data[idx:idx + length], idx + length
+
+
+# 米哈游 passport 体系通用 RSA 公钥（1024bit，社区通用值；服务端拉取接口已 404，故作为兜底）
+MI_RSA_FALLBACK_KEY = (
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDDvekdPMHN3AYhm/vktJT+YJr7"
+    "cI5DcsNKqdsx5DZX0gDuWFuIjzdwButrIYPNmRJ1G8ybDIF7oDW2eEpm5sMbL9zs"
+    "9ExXCdvqrn51qELbqj0XxtMTIpaCHFSI50PfPpTFV9Xt/hmyVwokoOXFlAEgCn+Q"
+    "CgGs52bFoYMtyi+xEQIDAQAB"
+)
+
+
+def mi_fetch_rsa_key() -> str:
+    """获取 RSA 公钥（base64 DER）：先尝试服务端，失败用内置公钥"""
+    for url in MI_RSA_KEY_URLS:
+        try:
+            resp = requests.get(url, timeout=10)
+            j = resp.json()
+            data = j.get("data") or {}
+            key = data.get("public_key") or data.get("rsa_key") or j.get("public_key") or j.get("rsa_key")
+            if key:
+                return key
+        except Exception:
+            continue
+    return MI_RSA_FALLBACK_KEY
+
+
+def rsa_encrypt(data: str, b64_der: str) -> str:
+    """RSA PKCS#1 v1.5 加密（米哈游 passport 短信登录用），纯标准库实现"""
+    der = base64.b64decode(b64_der)
+    _, spki, _ = _der_read(der, 0)
+    _, _, off = _der_read(spki, 0)
+    _, bitstr, _ = _der_read(spki, off)
+    if not bitstr or bitstr[0] != 0:
+        raise ValueError("RSA 公钥格式异常")
+    _, seq, _ = _der_read(bitstr[1:], 0)
+    _, n_bytes, off = _der_read(seq, 0)
+    _, e_bytes, _ = _der_read(seq, off)
+    n = int.from_bytes(n_bytes, "big")
+    e = int.from_bytes(e_bytes, "big")
+    k = (n.bit_length() + 7) // 8
+    msg = data.encode()
+    if len(msg) > k - 11:
+        raise ValueError("待加密内容过长")
+    padding = bytes(random.randint(1, 255) for _ in range(k - 3 - len(msg)))
+    em = b"\x00\x02" + padding + b"\x00" + msg
+    cipher = pow(int.from_bytes(em, "big"), e, n)
+    return base64.b64encode(cipher.to_bytes(k, "big")).decode()
+
+
+def mi_sms_headers(device_id: str) -> dict:
+    """短信登录专用请求头（对齐游戏客户端，无需 DS 签名）"""
+    return {
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "x-rpc-app_id": "c76ync6mutq8",
+        "x-rpc-channel_id": "1",
+        "x-rpc-channel_version": "2.49.0.189",
+        "x-rpc-client_type": "3",
+        "x-rpc-device_fp": "38d814469b1e4",
+        "x-rpc-device_id": device_id,
+        "x-rpc-device_model": "8BAB",
+        "x-rpc-device_name": "LAPTOP-TOOL",
+        "x-rpc-game_biz": "hk4e_cn",
+        "x-rpc-language": "zh-cn",
+        "x-rpc-lifecycle_id": str(uuid.uuid4()),
+        "x-rpc-mdk_version": "2.49.0.189",
+        "x-rpc-sdk_version": "2.49.0.189",
+        "x-rpc-sys_version": "Windows%2011",
+    }
+
+
+def mi_sms_login() -> None:
+    """米游社短信验证码登录：获取完整权限 stoken（米游币打卡必须，扫码 token 已被限制）"""
+    m = CONFIG["mihoyo"]
+    if not m["device_id"]:
+        m["device_id"] = str(uuid.uuid4())
+    mobile = input("输入米哈游账号手机号：").strip().replace("+86", "").strip()
+    if not mobile:
+        log.error("手机号为空，取消登录")
+        return
+    try:
+        pub_key = mi_fetch_rsa_key()
+    except Exception as e:
+        log.error(str(e))
+        return
+    enc_phone = rsa_encrypt(mobile, pub_key)
+    enc_area = rsa_encrypt("+86", pub_key)
+
+    action_type = ""
+    send = http_request("POST", MI_SMS_SEND_URL, headers=mi_sms_headers(m["device_id"]),
+                        data=json.dumps({"area_code": enc_area, "mobile": enc_phone},
+                                        separators=(",", ":")))
+    if send.get("retcode") == 0:
+        action_type = (send.get("data") or {}).get("action_type", "")
+        log.info("验证码已发送，请查看手机短信")
+    else:
+        log.warning(f"直接发送验证码失败（{send.get('retcode')} {send.get('message')}），改用备用方案：")
+        print("  浏览器打开 https://user.mihoyo.com/#/login → 输入同一手机号 → 完成滑块")
+        print("  验证并点「获取验证码」（不要点登录），收到验证码后回到这里输入")
+        try:
+            os.startfile("https://user.mihoyo.com/#/login")
+        except Exception:
+            pass
+
+    code = input("输入收到的短信验证码：").strip()
+    if not code:
+        log.error("验证码为空，取消登录")
+        return
+    result = http_request("POST", MI_SMS_LOGIN_URL, headers=mi_sms_headers(m["device_id"]),
+                          data=json.dumps({"area_code": enc_area, "action_type": action_type,
+                                           "captcha": code, "mobile": enc_phone},
+                                          separators=(",", ":")))
+    if result.get("retcode") == 0:
+        info = result["data"]["user_info"]
+        m["stoken"] = result["data"]["token"]["token"]
+        m["stuid"] = str(info["aid"])
+        m["mid"] = str(info["mid"])
+        m["account_id"] = m["stuid"]
+        if mi_refresh_cookie_token(m):
+            save_config(CONFIG)
+            log.info(f"米游社短信登录成功！uid={m['stuid']}（米游币打卡与游戏签到全部可用）")
+    else:
+        log.error(f"短信登录失败：{result.get('retcode')} {result.get('message')}"
+                  f"（验证码 5 分钟内有效，可重试）")
+
+
 def mi_qr_login() -> None:
-    """米游社 App 扫码登录，获取 stoken 并换出 cookie_token"""
+    """米游社 App 扫码登录，获取 stoken 并换出 cookie_token。
+
+    注意：2026-09 起米哈游限制了扫码获取的 stoken（仅够换取 cookie_token 做游戏签到），
+    米游币打卡需要完整权限 stoken，请优先使用短信验证码登录。
+    """
     m = CONFIG["mihoyo"]
     if not m["device_id"]:
         m["device_id"] = str(uuid.uuid4())
@@ -342,6 +499,25 @@ def mi_qr_login() -> None:
     log.error("等待扫码超时（5 分钟），退出登录流程")
 
 
+def mi_roles_call(m: dict) -> dict:
+    return http_request("GET", MI_ROLES_URL, headers=mi_web_headers(m),
+                        params={"game_biz": "hk4e_cn"})
+
+
+def mi_ensure_web_auth(m: dict) -> bool:
+    """确保网页端登录态可用；失效时用 stoken 续期一次并延迟重试。
+
+    注意：每次换取 cookie_token 都会使旧 token 作废（服务端单活轮换），
+    因此不要在无关流程里调用换取接口，续期后稍等片刻再重试。
+    """
+    if m.get("cookie_token") and mi_roles_call(m).get("retcode") == 0:
+        return True
+    if not mi_refresh_cookie_token(m):
+        return False
+    time.sleep(2)
+    return mi_roles_call(m).get("retcode") == 0
+
+
 def mi_bbs_checkin(m: dict) -> bool:
     """米游币打卡：逐个分区调用签到接口"""
     all_ok = True
@@ -357,7 +533,9 @@ def mi_bbs_checkin(m: dict) -> bool:
             log.warning(f"米游币打卡 [{name}]：触发风控验证码，今天请在 App 里手动打卡一次")
             all_ok = False
         elif code == -100:
-            log.error(f"米游币打卡 [{name}]：stoken 已失效，请重新扫码登录")
+            log.error(f"米游币打卡 [{name}]：stoken 无权限或已失效"
+                      f"（扫码获取的 token 已被米哈游限制权限，请用短信验证码方式重新登录："
+                      f"python checkin.py login）")
             return False
         else:
             msg = data.get("message", "")
@@ -395,11 +573,10 @@ def mi_game_sign(m: dict) -> bool:
         roles_data = http_request("GET", MI_ROLES_URL,
                                   headers=mi_web_headers(m),
                                   params={"game_biz": game["biz"]})
-        if roles_data.get("retcode") == -100:
-            if mi_refresh_cookie_token(m):
-                roles_data = http_request("GET", MI_ROLES_URL,
-                                          headers=mi_web_headers(m),
-                                          params={"game_biz": game["biz"]})
+        if roles_data.get("retcode") == -100 and mi_ensure_web_auth(m):
+            roles_data = http_request("GET", MI_ROLES_URL,
+                                      headers=mi_web_headers(m),
+                                      params={"game_biz": game["biz"]})
         if roles_data.get("retcode") != 0:
             log.warning(f"{name}：获取账号角色列表失败（{roles_data.get('retcode')} "
                         f"{roles_data.get('message')}），可能未绑定该游戏")
@@ -410,9 +587,11 @@ def mi_game_sign(m: dict) -> bool:
             log.info(f"{name}：账号未绑定该游戏，跳过")
             continue
 
+        headers = mi_web_headers(m)
+        headers.update(game.get("extra_headers", {}))
         rewards = []
         home = http_request("GET", f"{game['base']}/home",
-                            headers=mi_web_headers(m),
+                            headers=headers,
                             params={"lang": "zh-cn", "act_id": game["act_id"]})
         if home.get("retcode") == 0:
             rewards = home["data"].get("awards", [])
@@ -421,7 +600,7 @@ def mi_game_sign(m: dict) -> bool:
             uid, region, nick = role["game_uid"], role["region"], role["nickname"]
             time.sleep(random.randint(2, 6))
             info = http_request("GET", f"{game['base']}/info",
-                                headers=mi_web_headers(m),
+                                headers=headers,
                                 params={"lang": "zh-cn", "act_id": game["act_id"],
                                         "region": region, "uid": uid})
             if info.get("retcode") != 0:
@@ -442,7 +621,7 @@ def mi_game_sign(m: dict) -> bool:
 
             time.sleep(random.randint(2, 6))
             sign = http_request("POST", f"{game['base']}/sign",
-                                headers=mi_web_headers(m),
+                                headers=headers,
                                 json={"act_id": game["act_id"], "region": region, "uid": uid})
             if sign.get("retcode") == 0 and sign.get("data", {}).get("success") == 1:
                 award = rewards[total_day] if rewards and total_day < len(rewards) else {}
@@ -468,7 +647,8 @@ def mihoyo_run() -> bool:
     if not m["stoken"]:
         log.warning("米游社尚未登录（缺少 stoken），请先执行：python checkin.py login")
         return False
-    if not m["cookie_token"] and not mi_refresh_cookie_token(m):
+    if not mi_ensure_web_auth(m):
+        log.error("米游社网页端登录态不可用，请重新执行：python checkin.py login")
         return False
 
     ok = True
@@ -660,25 +840,10 @@ def cmd_test() -> int:
     log.info("─── 登录状态检查（只查询，不执行任何签到）───")
     m = CONFIG["mihoyo"]
     if m["stoken"]:
-        data = http_request("GET", MI_COOKIE_TOKEN_URL,
-                            headers={"Accept": "application/json",
-                                     "Cookie": mi_stoken_cookie(m)})
-        state = "有效" if data.get("retcode") == 0 else "已失效，请重新扫码登录"
-        log.info(f"米游社 stoken：{state}")
-        if m["cookie_token"]:
-            roles = http_request("GET", MI_ROLES_URL, headers=mi_web_headers(m),
-                                 params={"game_biz": "hk4e_cn"})
-            if roles.get("retcode") == 0:
-                log.info("米游社 cookie_token：有效")
-            elif mi_refresh_cookie_token(m):
-                roles = http_request("GET", MI_ROLES_URL, headers=mi_web_headers(m),
-                                     params={"game_biz": "hk4e_cn"})
-                state = "有效（已自动续期）" if roles.get("retcode") == 0 else "续期后仍无效"
-                log.info(f"米游社 cookie_token：{state}")
-            else:
-                log.info("米游社 cookie_token：已失效且自动续期失败")
+        if mi_ensure_web_auth(m):
+            log.info("米游社登录态：有效（stoken 与 cookie_token 均正常）")
         else:
-            log.info("米游社 cookie_token：为空（执行签到时会自动刷新）")
+            log.info("米游社登录态：已失效，请重新执行 python checkin.py login 扫码登录")
     else:
         log.info("米游社：未登录")
 
@@ -708,18 +873,21 @@ def main() -> int:
     CONFIG = load_config()
 
     if args.command == "login":
-        log.info("开始登录配置（米游社扫码 + 库街区短信，可随时 Ctrl+C 跳过某一项）")
+        log.info("开始登录配置")
+        print("\n─── 米游社登录（二选一）───")
+        print("  1. 短信验证码登录（推荐：米游币打卡 + 游戏签到全部可用）")
+        print("  2. App 扫码登录（2026-09 起米哈游限制了其权限，仅游戏签到可用）")
+        choice = input("选择 [1]: ").strip() or "1"
         m = CONFIG["mihoyo"]
         if m["stoken"]:
-            answer = input(f"米游社已登录（uid={m['stuid']}），是否重新扫码登录？(y/N)：").strip().lower()
-            need_mi = answer == "y"
-        else:
-            need_mi = True
-        if need_mi:
-            try:
+            print(f"（当前已登录 uid={m['stuid']}，重新登录将覆盖）")
+        try:
+            if choice == "2":
                 mi_qr_login()
-            except (KeyboardInterrupt, EOFError):
-                log.info("已跳过米游社扫码登录")
+            else:
+                mi_sms_login()
+        except (KeyboardInterrupt, EOFError):
+            log.info("已跳过米游社登录")
         k = CONFIG["kuro"]
         if k["token"]:
             answer = input(f"\n库街区已登录（用户ID={k['user_id']}），是否重新登录？(y/N)：").strip().lower()
