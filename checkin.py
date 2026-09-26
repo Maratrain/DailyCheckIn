@@ -668,8 +668,15 @@ def cmd_test() -> int:
         if m["cookie_token"]:
             roles = http_request("GET", MI_ROLES_URL, headers=mi_web_headers(m),
                                  params={"game_biz": "hk4e_cn"})
-            state = "有效" if roles.get("retcode") == 0 else "已失效"
-            log.info(f"米游社 cookie_token：{state}")
+            if roles.get("retcode") == 0:
+                log.info("米游社 cookie_token：有效")
+            elif mi_refresh_cookie_token(m):
+                roles = http_request("GET", MI_ROLES_URL, headers=mi_web_headers(m),
+                                     params={"game_biz": "hk4e_cn"})
+                state = "有效（已自动续期）" if roles.get("retcode") == 0 else "续期后仍无效"
+                log.info(f"米游社 cookie_token：{state}")
+            else:
+                log.info("米游社 cookie_token：已失效且自动续期失败")
         else:
             log.info("米游社 cookie_token：为空（执行签到时会自动刷新）")
     else:
