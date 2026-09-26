@@ -518,13 +518,15 @@ def kuro_request(url: str, headers: dict, data: dict) -> dict:
 
 
 def kuro_sms_login() -> None:
-    """库街区短信登录：网页上获取验证码，脚本用 手机号+验证码 换 token"""
+    """库街区短信登录：官网登录弹窗里获取验证码，脚本用 手机号+验证码 换 token"""
     print("\n─── 库街区登录 ───")
-    print("第一步：浏览器打开 https://www.kurobbs.com/mc/home/ ，输入手机号获取短信验证码")
+    print("第一步：浏览器已打开库街区官网 https://www.kurobbs.com/")
+    print("        → 点右上角「登录」→ 输入手机号 → 完成滑块验证 → 点「获取验证码」")
+    print("        → 收到短信验证码即可，网页上的「登录」按钮不用点")
     try:
-        os.startfile("https://www.kurobbs.com/mc/home/")
+        os.startfile("https://www.kurobbs.com/")
     except Exception:
-        pass
+        print("        （浏览器未自动打开，请手动访问 https://www.kurobbs.com/ ）")
     mobile = input("第二步：输入手机号：").strip()
     code = input("第三步：输入收到的短信验证码：").strip()
     if not mobile or not code:
@@ -700,16 +702,29 @@ def main() -> int:
 
     if args.command == "login":
         log.info("开始登录配置（米游社扫码 + 库街区短信，可随时 Ctrl+C 跳过某一项）")
-        try:
-            mi_qr_login()
-        except (KeyboardInterrupt, EOFError):
-            log.info("已跳过米游社扫码登录")
-        try:
-            answer = input("\n是否配置库街区登录？(Y/n)：").strip().lower()
-            if answer != "n":
+        m = CONFIG["mihoyo"]
+        if m["stoken"]:
+            answer = input(f"米游社已登录（uid={m['stuid']}），是否重新扫码登录？(y/N)：").strip().lower()
+            need_mi = answer == "y"
+        else:
+            need_mi = True
+        if need_mi:
+            try:
+                mi_qr_login()
+            except (KeyboardInterrupt, EOFError):
+                log.info("已跳过米游社扫码登录")
+        k = CONFIG["kuro"]
+        if k["token"]:
+            answer = input(f"\n库街区已登录（用户ID={k['user_id']}），是否重新登录？(y/N)：").strip().lower()
+            need_kuro = answer == "y"
+        else:
+            answer = input("\n是否现在配置库街区登录？(Y/n)：").strip().lower()
+            need_kuro = answer != "n"
+        if need_kuro:
+            try:
                 kuro_sms_login()
-        except (KeyboardInterrupt, EOFError):
-            log.info("已跳过库街区登录")
+            except (KeyboardInterrupt, EOFError):
+                log.info("已跳过库街区登录")
         log.info("登录流程结束。可执行 python checkin.py test 校验登录状态")
         return 0
     if args.command == "test":
