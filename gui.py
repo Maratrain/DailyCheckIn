@@ -14,8 +14,10 @@ import logging
 import os
 import queue
 import subprocess
+import sys
 import threading
 from datetime import datetime
+from pathlib import Path
 
 import customtkinter as ctk
 
@@ -175,6 +177,7 @@ class App(ctk.CTk):
         self.log_queue = queue.Queue()
         self.ui_queue = queue.Queue()
         self.running = False
+        self.applying = False
 
         setup_logging(console=False)
         checkin.CONFIG = load_config()
@@ -235,17 +238,34 @@ class App(ctk.CTk):
         self.mi_card = self._card(left, 0, "米游社", "", ACCENT)
         self.kuro_card = self._card(left, 1, "库街区", "", GREEN)
 
-        # 下次自动运行
+        # 每日自动执行 + 时间设置
         next_card = ctk.CTkFrame(left, corner_radius=14)
         next_card.grid(row=2, column=0, sticky="sew", padx=2, pady=8)
-        ctk.CTkLabel(next_card, text="⏰ 下次自动运行",
+        ctk.CTkLabel(next_card, text="⏰ 每日自动执行",
                      font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
         self.next_run_label = ctk.CTkLabel(next_card, text="查询中...",
                                            font=("Consolas", 15), text_color=ACCENT)
         self.next_run_label.pack(anchor="w", padx=18, pady=(2, 4))
-        ctk.CTkLabel(next_card, text="错过自动补跑 · 签到幂等不重复领取",
-                     font=("Microsoft YaHei UI", 11), text_color=GRAY).pack(
-            anchor="w", padx=18, pady=(0, 12))
+
+        time_row = ctk.CTkFrame(next_card, fg_color="transparent")
+        time_row.pack(fill="x", padx=18, pady=(0, 4))
+        self.hour_menu = ctk.CTkOptionMenu(time_row, values=[f"{h:02d}" for h in range(24)],
+                                           width=66, height=30)
+        self.hour_menu.set("00")
+        self.hour_menu.pack(side="left")
+        ctk.CTkLabel(time_row, text=" : ", font=("Consolas", 13)).pack(side="left")
+        self.minute_menu = ctk.CTkOptionMenu(time_row, values=[f"{m:02d}" for m in range(60)],
+                                             width=66, height=30)
+        self.minute_menu.set("02")
+        self.minute_menu.pack(side="left")
+        self.sched_btn = ctk.CTkButton(time_row, text="应用", width=70, height=30,
+                                       font=("Microsoft YaHei UI", 12),
+                                       command=self.apply_schedule)
+        self.sched_btn.pack(side="right")
+
+        self.sched_note = ctk.CTkLabel(next_card, text="错过自动补跑 · 签到幂等不重复领取",
+                                       font=("Microsoft YaHei UI", 11), text_color=GRAY)
+        self.sched_note.pack(anchor="w", padx=18, pady=(0, 12))
 
         # 右列：操作按钮
         right = ctk.CTkFrame(body, fg_color="transparent")
@@ -326,20 +346,88 @@ class App(ctk.CTk):
 
     def refresh_next_run(self):
         def worker():
-            text = "未安装计划任务（双击 install_task.bat 注册）"
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            trigger, next_run = "", ""
             try:
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                r = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "$i = Get-ScheduledTaskInfo -TaskPath '\\DailyCheckIn\\' -TaskName 'daily'; "
-                     "if ($i.NextRunTime) { $i.NextRunTime.ToString('yyyy-MM-dd HH:mm') }"],
-                    capture_output=True, text=True, timeout=15, creationflags=flags)
-                out = (r.stdout or "").strip()
-                if out:
-                    text = out
+                ps = ("$t = Get-ScheduledTask -TaskPath '\\DailyCheckIn\\' -TaskName 'daily' "
+                      "-ErrorAction SilentlyContinue; "
+                      "if ($t) { ([datetime]$t.Triggers[0].StartBoundary).ToString('HH:mm'); "
+                      "(Get-ScheduledTaskInfo -TaskPath '\\DailyCheckIn\\' -TaskName 'daily').NextRunTime.ToString('yyyy-MM-dd HH:mm') }")
+                r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                   capture_output=True, text=True, timeout=15, creationflags=flags)
+                lines = [l.strip() for l in (r.stdout or "").splitlines() if l.strip()]
+                if len(lines) >= 2:
+                    trigger, next_run = lines[0], lines[1]
             except Exception:
                 pass
-            self.ui_queue.put(lambda: self.next_run_label.configure(text=text))
+
+            def ui():
+                if not next_run:
+                    self.next_run_label.configure(text="未注册（选择时间后点「应用」即可开启）")
+                    return
+                self.next_run_label.configure(text=next_run)
+                if len(trigger) >= 5 and not self.applying:
+                    hh, mm = trigger[:2], trigger[3:5]
+                    if hh.isdigit() and mm.isdigit():
+                        self.hour_menu.set(hh)
+                        self.minute_menu.set(mm)
+                    self.sched_note.configure(text=f"每日 {trigger} 自动执行 · 错过开机补跑")
+                else:
+                    self.sched_note.configure(text="错过自动补跑 · 签到幂等不重复领取")
+
+            self.ui_queue.put(ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _pick_python() -> str:
+        """计划任务优先用 pythonw（执行时不弹控制台窗口）"""
+        exe = Path(sys.executable)
+        pythonw = exe.with_name("pythonw.exe")
+        return str(pythonw) if pythonw.exists() else str(exe)
+
+    def apply_schedule(self):
+        """把界面选择的每日执行时间写入 Windows 计划任务（含错过补跑设置）"""
+        if self.applying:
+            return
+        hhmm = f"{int(self.hour_menu.get()):02d}:{int(self.minute_menu.get()):02d}"
+        self.applying = True
+        self.sched_btn.configure(state="disabled")
+        log.info(f"正在设置每日自动执行时间为 {hhmm} ...")
+
+        def worker():
+            ok, msg = False, ""
+            try:
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                python_exe = self._pick_python()
+                script = str(ROOT / "checkin.py")
+                r = subprocess.run(
+                    ["schtasks", "/Create", "/F", "/TN", "DailyCheckIn\\daily",
+                     "/TR", f'"{python_exe}" "{script}" run',
+                     "/SC", "DAILY", "/ST", hhmm],
+                    capture_output=True, timeout=30, creationflags=flags)
+                if r.returncode != 0:
+                    detail = (r.stderr or r.stdout or b"").decode("gbk", "ignore").strip()
+                    msg = f"设置失败：{detail or f'returncode={r.returncode}'}"
+                else:
+                    ps = ("$t = Get-ScheduledTask -TaskPath '\\DailyCheckIn\\' -TaskName 'daily'; "
+                          "$t.Settings.StartWhenAvailable = $true; $t | Set-ScheduledTask")
+                    r2 = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                        capture_output=True, timeout=60, creationflags=flags)
+                    ok = r2.returncode == 0
+                    msg = (f"已设置每天 {hhmm} 自动签到，错过开机补跑已开启"
+                           if ok else
+                           f"计划任务时间已改为 {hhmm}，但补跑设置未生效（可双击 install_task.bat 修复）")
+            except Exception as e:
+                msg = f"设置失败：{e}"
+
+            def ui():
+                self.applying = False
+                self.sched_btn.configure(state="normal")
+                (log.info if ok else log.error)(msg)
+                self.refresh_next_run()
+
+            self.ui_queue.put(ui)
 
         threading.Thread(target=worker, daemon=True).start()
 
