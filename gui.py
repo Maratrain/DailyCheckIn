@@ -13,6 +13,7 @@
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -249,16 +250,10 @@ class App(ctk.CTk):
 
         time_row = ctk.CTkFrame(next_card, fg_color="transparent")
         time_row.pack(fill="x", padx=18, pady=(0, 4))
-        self.hour_menu = ctk.CTkOptionMenu(time_row, values=[f"{h:02d}" for h in range(24)],
-                                           width=66, height=30)
-        self.hour_menu.set("00")
-        self.hour_menu.pack(side="left")
-        ctk.CTkLabel(time_row, text=" : ", font=("Consolas", 13)).pack(side="left")
-        self.minute_menu = ctk.CTkOptionMenu(time_row, values=[f"{m:02d}" for m in range(60)],
-                                             width=66, height=30)
-        self.minute_menu.set("02")
-        self.minute_menu.pack(side="left")
-        self.sched_btn = ctk.CTkButton(time_row, text="应用", width=70, height=30,
+        self.time_entry = ctk.CTkEntry(time_row, placeholder_text="00:02", width=104,
+                                       height=32, justify="center", font=("Consolas", 15))
+        self.time_entry.pack(side="left")
+        self.sched_btn = ctk.CTkButton(time_row, text="应用到计划任务", width=130, height=32,
                                        font=("Microsoft YaHei UI", 12),
                                        command=self.apply_schedule)
         self.sched_btn.pack(side="right")
@@ -363,17 +358,22 @@ class App(ctk.CTk):
 
             def ui():
                 if not next_run:
-                    self.next_run_label.configure(text="未注册（选择时间后点「应用」即可开启）")
+                    self.next_run_label.configure(text="未注册（输入时间后点「应用」即可开启）")
                     return
                 self.next_run_label.configure(text=next_run)
-                if len(trigger) >= 5 and not self.applying:
-                    hh, mm = trigger[:2], trigger[3:5]
-                    if hh.isdigit() and mm.isdigit():
-                        self.hour_menu.set(hh)
-                        self.minute_menu.set(mm)
-                    self.sched_note.configure(text=f"每日 {trigger} 自动执行 · 错过开机补跑")
+                if trigger and not self.applying:
+                    if self.time_entry.get() != trigger:
+                        try:
+                            if self.focus_get() is not self.time_entry:
+                                self.time_entry.delete(0, "end")
+                                self.time_entry.insert(0, trigger)
+                        except Exception:
+                            pass
+                    self.sched_note.configure(text=f"每日 {trigger} 自动执行 · 错过开机补跑",
+                                              text_color=GRAY)
                 else:
-                    self.sched_note.configure(text="错过自动补跑 · 签到幂等不重复领取")
+                    self.sched_note.configure(text="错过自动补跑 · 签到幂等不重复领取",
+                                              text_color=GRAY)
 
             self.ui_queue.put(ui)
 
@@ -387,10 +387,15 @@ class App(ctk.CTk):
         return str(pythonw) if pythonw.exists() else str(exe)
 
     def apply_schedule(self):
-        """把界面选择的每日执行时间写入 Windows 计划任务（含错过补跑设置）"""
+        """把界面输入的每日执行时间写入 Windows 计划任务（含错过补跑设置）"""
         if self.applying:
             return
-        hhmm = f"{int(self.hour_menu.get()):02d}:{int(self.minute_menu.get()):02d}"
+        raw = self.time_entry.get().strip()
+        m = re.match(r"^(\d{1,2})[:：](\d{1,2})$", raw)
+        if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+            self.sched_note.configure(text="时间格式应为 HH:MM（如 08:30）", text_color=RED)
+            return
+        hhmm = f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
         self.applying = True
         self.sched_btn.configure(state="disabled")
         log.info(f"正在设置每日自动执行时间为 {hhmm} ...")
