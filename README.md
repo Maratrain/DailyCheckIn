@@ -50,6 +50,13 @@
   库街区：完成
 ```
 
+## 🖥️ 图形界面预览
+
+<div align="center">
+<img src="docs/gui.png" alt="DailyCheckIn 图形界面" width="920">
+<p><sub>左：主界面（登录状态 · 一键签到 · 每日时间设置）　右：短信验证码登录弹窗</sub></p>
+</div>
+
 ## 🚀 快速开始
 
 ### 1️⃣ 安装依赖
@@ -140,6 +147,7 @@ DailyCheckIn/
 ├── install_task.bat    # 注册每日计划任务
 ├── uninstall_task.bat  # 移除计划任务
 ├── 启动界面.bat         # 双击打开图形界面
+├── docs/               # README 图片资源
 └── logs/               # 按天滚动的运行日志
 ```
 
