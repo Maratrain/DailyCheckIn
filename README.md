@@ -26,7 +26,8 @@
 **特点：**
 
 - 🔐 **零抓包** —— 米游社用短信验证码 / App 扫码登录，库街区用短信验证码登录，全程不需要 Charles/Fiddler
-- 📦 **单文件** —— 核心就是一个 `checkin.py`，除 `requests` 外零第三方依赖（RSA 加密为纯标准库实现）
+- 🖥️ **可选图形界面** —— 深色桌面 GUI（CustomTkinter），状态卡片 + 一键签到 + 登录弹窗 + 实时日志
+- 📦 **单文件核心** —— `checkin.py` 一个文件搞定签到，除 `requests` 外零第三方依赖（RSA 加密为纯标准库实现）
 - ⏰ **双保险定时** —— Windows 计划任务每天定时执行 + 开机自启补跑；错过补跑（`StartWhenAvailable`），电脑没开机也不漏签
 - 🔄 **自动续期** —— 米游社 cookie_token 过期自动用 stoken 续期，长期免维护
 - 📝 **中文日志** —— 每一步都有进度提示，按天写入 `logs/`
@@ -54,12 +55,16 @@
 ### 1️⃣ 安装依赖
 
 ```bash
-pip install requests qrcode
+pip install -r requirements.txt
 ```
 
-> `qrcode` 仅用于扫码登录时显示二维码，不装也能用链接方式登录。
+> 仅用命令行的话 `pip install requests` 即可；要用图形界面需额外装 `customtkinter`（`requirements.txt` 已统一包含）。
 
 ### 2️⃣ 登录（每个平台只需一次）
+
+**图形界面**（推荐）：双击 `启动界面.bat`（或 `python gui.py`）→ 点「登录米游社 / 登录库街区」→ 在弹窗里输入手机号获取验证码登录。
+
+**命令行**：
 
 ```bash
 python checkin.py login
@@ -128,10 +133,13 @@ python checkin.py login  # 重新登录（凭证过期时用）
 
 ```
 DailyCheckIn/
-├── checkin.py          # 主程序（单文件）
+├── checkin.py          # 签到核心（命令行入口，单文件）
+├── gui.py              # 图形界面（CustomTkinter 深色主题）
 ├── config.json         # 配置与登录凭证（自动生成，已 gitignore）
-├── install_task.bat    # 注册计划任务
+├── requirements.txt    # 依赖清单
+├── install_task.bat    # 注册每日计划任务
 ├── uninstall_task.bat  # 移除计划任务
+├── 启动界面.bat         # 双击打开图形界面
 └── logs/               # 按天滚动的运行日志
 ```
 

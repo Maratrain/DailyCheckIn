@@ -145,15 +145,16 @@ def get_lan_ip() -> str:
         return "192.168.1.101"
 
 
-def setup_logging() -> None:
+def setup_logging(console: bool = True) -> None:
     LOG_DIR.mkdir(exist_ok=True)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     log.setLevel(logging.INFO)
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(fmt)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(fmt)
     log_file = logging.FileHandler(LOG_DIR / f"checkin_{datetime.now():%Y-%m-%d}.log", encoding="utf-8")
     log_file.setFormatter(fmt)
-    log.addHandler(console)
+    if console:
+        log.addHandler(console_handler)
     log.addHandler(log_file)
 
 
@@ -424,52 +425,47 @@ def mi_sms_headers(device_id: str) -> dict:
     }
 
 
-def mi_sms_login() -> None:
-    """米游社短信验证码登录：获取完整权限 stoken（米游币打卡必须，扫码 token 已被限制）"""
+def mi_sms_send(mobile: str) -> tuple:
+    """发送米游社登录验证码，返回 (是否成功, 提示信息)。供 CLI 与 GUI 共用。"""
     m = CONFIG["mihoyo"]
     if not m["device_id"]:
         m["device_id"] = str(uuid.uuid4())
-    mobile = input("输入米哈游账号手机号：").strip().replace("+86", "").strip()
+    mobile = (mobile or "").strip().replace("+86", "").strip()
     if not mobile:
-        log.error("手机号为空，取消登录")
-        return
+        return False, "手机号为空"
     try:
         pub_key = mi_fetch_rsa_key()
     except Exception as e:
-        log.error(str(e))
-        return
+        return False, str(e)
     enc_phone = rsa_encrypt(mobile, pub_key)
     enc_area = rsa_encrypt("+86", pub_key)
-
-    action_type = "login_by_mobile_captcha"
     send = http_request("POST", MI_SMS_SEND_URL, headers=mi_sms_headers(m["device_id"]),
                         data=json.dumps({"area_code": enc_area, "mobile": enc_phone},
                                         separators=(",", ":")))
-    if send.get("retcode") == 0:
-        log.info("验证码已发送，请查看手机短信")
-    elif send.get("retcode") == -3101:
-        log.info("直接发送验证码需要人机验证，改用网页备用方案：")
-        print("  浏览器打开 https://user.mihoyo.com/#/login → 输入同一手机号 → 完成滑块")
-        print("  验证并点「获取验证码」（不要点登录），收到验证码后回到这里输入")
-        try:
-            os.startfile("https://user.mihoyo.com/#/login")
-        except Exception:
-            pass
-    else:
-        log.warning(f"直接发送验证码失败（{send.get('retcode')} {send.get('message')}），改用备用方案：")
-        print("  浏览器打开 https://user.mihoyo.com/#/login → 输入同一手机号 → 完成滑块")
-        print("  验证并点「获取验证码」（不要点登录），收到验证码后回到这里输入")
-        try:
-            os.startfile("https://user.mihoyo.com/#/login")
-        except Exception:
-            pass
+    rc = send.get("retcode")
+    if rc == 0:
+        return True, "验证码已发送，请查看手机短信"
+    if rc == -3101:
+        return False, "发送验证码需要人机验证：请在浏览器打开 https://user.mihoyo.com/#/login，" \
+                      "输入同一手机号完成滑块并点「获取验证码」（不要点登录）"
+    return False, f"发送失败（{rc} {send.get('message')}），可改在 user.mihoyo.com 网页端获取验证码"
 
-    code = input("输入收到的短信验证码：").strip()
-    if not code:
-        log.error("验证码为空，取消登录")
-        return
+
+def mi_sms_verify(mobile: str, code: str) -> tuple:
+    """用 手机号+验证码 完成米游社登录，返回 (是否成功, 提示信息)。供 CLI 与 GUI 共用。"""
+    m = CONFIG["mihoyo"]
+    mobile = (mobile or "").strip().replace("+86", "").strip()
+    code = (code or "").strip()
+    if not mobile or not code:
+        return False, "手机号或验证码为空"
+    try:
+        pub_key = mi_fetch_rsa_key()
+    except Exception as e:
+        return False, str(e)
+    enc_phone = rsa_encrypt(mobile, pub_key)
+    enc_area = rsa_encrypt("+86", pub_key)
     result = http_request("POST", MI_SMS_LOGIN_URL, headers=mi_sms_headers(m["device_id"]),
-                          data=json.dumps({"area_code": enc_area, "action_type": action_type,
+                          data=json.dumps({"area_code": enc_area, "action_type": "login_by_mobile_captcha",
                                            "captcha": code, "mobile": enc_phone},
                                           separators=(",", ":")))
     if result.get("retcode") == 0:
@@ -480,14 +476,31 @@ def mi_sms_login() -> None:
         m["account_id"] = m["stuid"]
         # 先保存 stoken 再兑换 cookie_token，避免兑换失败时丢弃登录成果
         save_config(CONFIG)
-        log.info(f"米游社短信登录成功！stoken 已保存（uid={m['stuid']}，前缀 {m['stoken'][:4]}...）")
+        msg = f"米游社短信登录成功！stoken 已保存（uid={m['stuid']}）"
         if mi_refresh_cookie_token(m):
-            log.info("米游币打卡与游戏签到全部可用")
+            msg += "，cookie_token 已兑换，米游币打卡与游戏签到全部可用"
         else:
-            log.warning("cookie_token 暂未换出：米游币打卡不受影响，游戏签到会在运行时自动重试")
+            msg += "，cookie_token 稍后自动重试（米游币打卡不受影响）"
+        return True, msg
+    return False, (f"短信登录失败：{result.get('retcode')} {result.get('message')}"
+                   f"（验证码 5 分钟内有效，可重试）")
+
+
+def mi_sms_login() -> None:
+    """米游社短信验证码登录（CLI 交互封装）"""
+    mobile = input("输入米哈游账号手机号：")
+    ok, msg = mi_sms_send(mobile)
+    if ok:
+        log.info(msg)
     else:
-        log.error(f"短信登录失败：{result.get('retcode')} {result.get('message')}"
-                  f"（验证码 5 分钟内有效，可重试）")
+        log.warning(msg)
+        try:
+            os.startfile("https://user.mihoyo.com/#/login")
+        except Exception:
+            pass
+    code = input("输入收到的短信验证码：")
+    ok, msg = mi_sms_verify(mobile, code)
+    (log.info if ok else log.error)(msg)
 
 
 def mi_qr_login() -> None:
@@ -786,23 +799,16 @@ def kuro_request(url: str, headers: dict, data: dict) -> dict:
     return result
 
 
-def kuro_sms_login() -> None:
-    """库街区短信登录：官网登录弹窗里获取验证码，脚本用 手机号+验证码 换 token"""
-    print("\n─── 库街区登录 ───")
-    print("第一步：浏览器已打开库街区官网 https://www.kurobbs.com/")
-    print("        → 点右上角「登录」→ 输入手机号 → 完成滑块验证 → 点「获取验证码」")
-    print("        → 收到短信验证码即可，网页上的「登录」按钮不用点")
-    try:
-        os.startfile("https://www.kurobbs.com/")
-    except Exception:
-        print("        （浏览器未自动打开，请手动访问 https://www.kurobbs.com/ ）")
-    mobile = input("第二步：输入手机号：").strip()
-    code = input("第三步：输入收到的短信验证码：").strip()
-    if not mobile or not code:
-        log.error("手机号或验证码为空，取消库街区登录")
-        return
+def kuro_sms_verify(mobile: str, code: str) -> tuple:
+    """用 手机号+验证码 完成库街区登录，返回 (是否成功, 提示信息)。供 CLI 与 GUI 共用。
 
+    验证码需先在库街区官网（https://www.kurobbs.com/）登录弹窗里获取。
+    """
     k = CONFIG["kuro"]
+    mobile = (mobile or "").strip()
+    code = (code or "").strip()
+    if not mobile or not code:
+        return False, "手机号或验证码为空"
     if not k["devcode"]:
         k["devcode"] = uuid.uuid4().hex
     if not k["distinct_id"]:
@@ -829,9 +835,24 @@ def kuro_sms_login() -> None:
         k["token"] = str(result["data"]["token"])
         k["user_id"] = str(result["data"].get("userId", ""))
         save_config(CONFIG)
-        log.info(f"库街区登录成功！用户 ID={k['user_id']}")
-    else:
-        log.error(f"库街区登录失败：{result.get('message', result)}（验证码可能已过期，请重试）")
+        return True, f"库街区登录成功！用户 ID={k['user_id']}"
+    return False, f"库街区登录失败：{result.get('message', result)}（验证码可能已过期，请重试）"
+
+
+def kuro_sms_login() -> None:
+    """库街区短信登录（CLI 交互封装）"""
+    print("\n─── 库街区登录 ───")
+    print("第一步：浏览器已打开库街区官网 https://www.kurobbs.com/")
+    print("        → 点右上角「登录」→ 输入手机号 → 完成滑块验证 → 点「获取验证码」")
+    print("        → 收到短信验证码即可，网页上的「登录」按钮不用点")
+    try:
+        os.startfile("https://www.kurobbs.com/")
+    except Exception:
+        print("        （浏览器未自动打开，请手动访问 https://www.kurobbs.com/ ）")
+    mobile = input("第二步：输入手机号：")
+    code = input("第三步：输入收到的短信验证码：")
+    ok, msg = kuro_sms_verify(mobile, code)
+    (log.info if ok else log.error)(msg)
 
 
 def kuro_sign() -> bool:
