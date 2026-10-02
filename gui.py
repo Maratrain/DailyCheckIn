@@ -27,7 +27,8 @@ from checkin import (
     CONFIG_FILE, LOG_DIR, ROOT, KURO_MINE_URL,
     load_config, setup_logging, log, today_done_summary,
     mihoyo_run, kuro_sign, cmd_run, weibo_run,
-    mi_ensure_web_auth, kuro_request, kuro_user_headers, wb_verify_login, wb_verify_cookie,
+    mi_ensure_web_auth, kuro_request, kuro_user_headers,
+    wb_verify_login, wb_verify_cookie, wb_browser_login,
     mi_sms_send, mi_sms_verify, kuro_sms_verify,
 )
 
@@ -183,30 +184,38 @@ class WeiboLoginDialog(ctk.CTkToplevel):
         ctk.CTkLabel(self, text="微博 · 超话签到登录",
                      font=("Microsoft YaHei UI", 18, "bold")).grid(
             row=0, column=0, padx=24, pady=(24, 4), sticky="w")
-        hint = ("第一步：点下方按钮打开微博网页版并登录\n"
-                "第二步：登录后按 F12 →「网络/Network」→ 刷新页面 → 点任意请求 →\n"
-                "在「请求标头」里找到 Cookie 一行，整行复制粘贴到下面\n"
-                "签到会覆盖你关注的全部超话（包括原神超话）")
+        hint = ("推荐：点「自动获取 Cookie」，会打开浏览器，在页面中登录微博后自动抓取保存。\n"
+                "签到会覆盖你关注的全部超话（包括原神超话）。\n"
+                "自动方式不可用时，可按下面步骤手动复制 Cookie 粘贴。")
         ctk.CTkLabel(self, text=hint, wraplength=470, justify="left",
                      text_color=GRAY, font=("Microsoft YaHei UI", 12)).grid(
             row=1, column=0, padx=24, pady=(0, 10), sticky="w")
 
-        ctk.CTkButton(self, text="打开微博网页版", height=36,
+        self.auto_btn = ctk.CTkButton(self, text="🤖 自动获取 Cookie（推荐）", height=44,
+                                      font=("Microsoft YaHei UI", 14, "bold"),
+                                      command=self.auto_grab)
+        self.auto_btn.grid(row=2, column=0, padx=24, pady=(0, 8), sticky="ew")
+
+        ctk.CTkLabel(self, text="—— 或手动粘贴 Cookie ——", text_color=GRAY,
+                     font=("Microsoft YaHei UI", 11)).grid(
+            row=3, column=0, padx=24, pady=(0, 6))
+
+        ctk.CTkButton(self, text="打开微博网页版", height=32,
                       fg_color="#4B5563", hover_color="#374151",
                       command=lambda: self._open("https://m.weibo.cn")).grid(
-            row=2, column=0, padx=24, pady=(0, 10), sticky="ew")
+            row=4, column=0, padx=24, pady=(0, 8), sticky="ew")
 
-        self.cookie_box = ctk.CTkTextbox(self, height=90, font=("Consolas", 12))
-        self.cookie_box.grid(row=3, column=0, padx=24, pady=(0, 10), sticky="ew")
+        self.cookie_box = ctk.CTkTextbox(self, height=70, font=("Consolas", 12))
+        self.cookie_box.grid(row=5, column=0, padx=24, pady=(0, 8), sticky="ew")
 
-        self.save_btn = ctk.CTkButton(self, text="保存并验证", height=42,
-                                      font=("Microsoft YaHei UI", 14, "bold"),
+        self.save_btn = ctk.CTkButton(self, text="保存并验证", height=38,
+                                      font=("Microsoft YaHei UI", 13),
                                       command=self.do_save)
-        self.save_btn.grid(row=4, column=0, padx=24, pady=(0, 4), sticky="ew")
+        self.save_btn.grid(row=6, column=0, padx=24, pady=(0, 4), sticky="ew")
 
         self.status = ctk.CTkLabel(self, text="", wraplength=470, justify="left",
                                    font=("Microsoft YaHei UI", 12))
-        self.status.grid(row=5, column=0, padx=24, pady=(4, 16), sticky="ew")
+        self.status.grid(row=7, column=0, padx=24, pady=(4, 16), sticky="ew")
 
         self.transient(master)
         self.lift()
@@ -218,6 +227,27 @@ class WeiboLoginDialog(ctk.CTkToplevel):
             os.startfile(url)
         except Exception:
             pass
+
+    def auto_grab(self):
+        """自动方式：打开浏览器让用户登录，登录后自动抓取 Cookie"""
+        self.auto_btn.configure(state="disabled")
+        self.status.configure(text="正在启动浏览器，请在打开的窗口中登录微博，登录后自动抓取...",
+                              text_color=GRAY)
+
+        def worker():
+            ok, msg = wb_browser_login(headless=False, timeout=600)
+            checkin.log.info(msg)
+
+            def ui():
+                self.auto_btn.configure(state="normal")
+                self.status.configure(text=msg, text_color=GREEN if ok else RED)
+                if ok:
+                    self.app.refresh_status()
+                    self.after(1500, self.destroy)
+
+            self.app.ui_queue.put(ui)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def do_save(self):
         raw = self.cookie_box.get("1.0", "end").strip()

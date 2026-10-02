@@ -1156,18 +1156,84 @@ def wb_verify_cookie(raw: str) -> tuple:
     return False, "Cookie 无效或已失效，请重新复制"
 
 
+def wb_browser_login(headless: bool = False, timeout: int = 600) -> tuple:
+    """用 Playwright 驱动本机 Edge/Chrome 打开微博，用户登录后自动抓取 Cookie。
+
+    浏览器配置文件保存在 weibo_profile/（已 gitignore），再次登录大概率免扫码。
+    需要可选依赖 playwright（pip install playwright），使用系统自带 Edge，无需下载浏览器。
+    返回 (是否成功, 提示信息)。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False, "未安装 playwright，无法自动获取（pip install playwright）"
+
+    profile = ROOT / "weibo_profile"
+    profile.mkdir(exist_ok=True)
+    cookie_str, logged = "", False
+    with sync_playwright() as p:
+        browser = None
+        last_err = ""
+        for channel in ("msedge", "chrome", None):
+            try:
+                browser = p.chromium.launch_persistent_context(
+                    str(profile), channel=channel, headless=headless,
+                    viewport={"width": 1280, "height": 860})
+                break
+            except Exception as e:
+                last_err = str(e)
+                browser = None
+        if browser is None:
+            return False, (f"无法启动本机浏览器（{last_err[:80]}）。"
+                           f"可尝试安装自带内核：playwright install chromium")
+        try:
+            page = browser.pages[0] if browser.pages else browser.new_page()
+            page.goto("https://m.weibo.cn/", wait_until="domcontentloaded", timeout=30000)
+            if not headless:
+                page.bring_to_front()
+            log.info("浏览器已打开，请在窗口中登录微博，登录成功后自动抓取 Cookie...")
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    d = browser.request.get("https://m.weibo.cn/api/config").json().get("data") or {}
+                    if d.get("login") in (True, 1, "1"):
+                        logged = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(2)
+            if logged:
+                cookies = browser.cookies(["https://m.weibo.cn"])
+                cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+        finally:
+            browser.close()
+    if not logged:
+        return False, "等待登录超时（10 分钟），未抓取到登录态"
+    w = CONFIG["weibo"]
+    w["cookie"] = cookie_str
+    ok, who = wb_verify_login(w)
+    if ok:
+        save_config(CONFIG)
+        return True, f"微博登录成功！昵称：{who}（Cookie 已自动保存）"
+    return False, "抓取到的 Cookie 校验未通过，请重试"
+
+
 def wb_cookie_login() -> None:
-    """微博 Cookie 登录（CLI 交互封装）"""
+    """微博 Cookie 登录（CLI 交互封装）：自动抓取优先，手动粘贴兜底"""
     print("\n─── 微博超话登录 ───")
-    print("第一步：浏览器打开 https://m.weibo.cn 并登录")
-    print("        （签到会覆盖你关注的全部超话，包括原神超话）")
+    print("即将打开浏览器，请在页面中登录微博（签到会覆盖你关注的全部超话，包括原神超话）")
+    ok, msg = wb_browser_login(headless=False, timeout=600)
+    if ok:
+        log.info(msg)
+        return
+    log.warning(f"自动获取失败：{msg}")
+    print("改用手动方式：浏览器打开 https://m.weibo.cn 并登录")
+    print("登录后按 F12 →「网络/Network」→ 刷新页面 → 点任意请求 → 复制 Cookie 整行")
     try:
         os.startfile("https://m.weibo.cn")
     except Exception:
         pass
-    print("第二步：登录后按 F12 →「网络/Network」→ 刷新页面 → 点任意请求 →")
-    print("        在「请求标头」里找到 Cookie 一行，复制整行值")
-    raw = input("第三步：粘贴 Cookie：")
+    raw = input("粘贴 Cookie：")
     ok, msg = wb_verify_cookie(raw)
     (log.info if ok else log.error)(msg)
 

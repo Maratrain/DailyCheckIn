@@ -4,6 +4,9 @@ requests>=2.28
 # 扫码登录（可选，仅米游社扫码显示二维码用）
 qrcode>=7.4
 
+# 微博自动登录抓 Cookie（可选；使用系统自带 Edge，无需下载浏览器）
+playwright>=1.40
+
 # 图形界面（可选）
 customtkinter>=5.2
 pillow>=10.0
