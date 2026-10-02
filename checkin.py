@@ -679,6 +679,21 @@ def mi_ensure_web_auth(m: dict) -> bool:
 
 def mi_bbs_checkin(m: dict) -> bool:
     """米游币打卡：逐个分区调用签到接口"""
+    # 先查任务状态：米游币已拿满说明含打卡在内的任务全部完成，直接跳过，
+    # 避免无谓的打卡请求触发风控验证码
+    tasks = http_request("GET", MI_TASKS_URL,
+                         headers={"Accept": "application/json, text/plain, */*",
+                                  "User-Agent": MI_UA,
+                                  "Referer": "https://webstatic.mihoyo.com",
+                                  "Cookie": mi_web_cookie(m)},
+                         params={"point_sn": "myb"})
+    if tasks.get("retcode") == 0:
+        t = tasks.get("data", {})
+        if t.get("can_get_points") == 0:
+            log.info(f"米游币：今日已拿满（已获得 {t.get('already_received_points', '?')}，"
+                     f"共 {t.get('total_points', '?')}），打卡跳过")
+            return True
+
     all_ok = True
     for gid in m["bbs_gids"]:
         name = MI_BBS_PARTITIONS.get(str(gid), f"分区{gid}")
@@ -707,18 +722,6 @@ def mi_bbs_checkin(m: dict) -> bool:
                 log.warning(f"米游币打卡 [{name}]：失败（{code} {msg}）")
                 all_ok = False
         time.sleep(random.randint(2, 6))
-
-    # 顺便汇报今日米游币获取情况（失败不影响主流程）
-    tasks = http_request("GET", MI_TASKS_URL,
-                         headers={"Accept": "application/json, text/plain, */*",
-                                  "User-Agent": MI_UA,
-                                  "Referer": "https://webstatic.mihoyo.com",
-                                  "Cookie": mi_web_cookie(m)},
-                         params={"point_sn": "myb"})
-    if tasks.get("retcode") == 0:
-        t = tasks["data"]
-        log.info(f"米游币：今日已获得 {t.get('already_received_points', '?')}，"
-                 f"还可获取 {t.get('can_get_points', '?')}，当前共 {t.get('total_points', '?')}")
     return all_ok
 
 
