@@ -277,8 +277,8 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("DailyCheckIn · 每日自动签到")
-        self.geometry("1020x765")
-        self.minsize(880, 700)
+        self.geometry("1020x880")
+        self.minsize(880, 800)
 
         self.log_queue = queue.Queue()
         self.ui_queue = queue.Queue()
@@ -312,12 +312,12 @@ class App(ctk.CTk):
 
     # ────────── 界面构建 ──────────
     def _build_header(self):
-        bar = ctk.CTkFrame(self, fg_color="transparent", height=56)
-        bar.pack(fill="x", padx=24, pady=(12, 4))
+        bar = ctk.CTkFrame(self, fg_color="transparent", height=70)
+        bar.pack(fill="x", padx=24, pady=(18, 6))
         ctk.CTkLabel(bar, text="🗓️ DailyCheckIn",
-                     font=("Microsoft YaHei UI", 24, "bold")).pack(side="left")
+                     font=("Microsoft YaHei UI", 26, "bold")).pack(side="left")
         ctk.CTkLabel(bar, text="米游社 · 库街区 · 微博超话 每日自动签到",
-                     font=("Microsoft YaHei UI", 12), text_color=GRAY).pack(side="left", padx=12, pady=(8, 0))
+                     font=("Microsoft YaHei UI", 13), text_color=GRAY).pack(side="left", padx=14, pady=(10, 0))
 
         self.theme_btn = ctk.CTkButton(bar, text="🌓", width=40, height=32,
                                        fg_color="#374151", hover_color="#4B5563",
@@ -325,20 +325,19 @@ class App(ctk.CTk):
                                            "light" if ctk.get_appearance_mode().lower() == "dark" else "dark"))
         self.theme_btn.pack(side="right")
 
-    def _card(self, parent, row, title, color):
-        """紧凑状态卡：标题与状态点同行，说明一行，整体约 80px 高"""
-        card = ctk.CTkFrame(parent, corner_radius=12)
-        card.grid(row=row, column=0, sticky="ew", padx=2, pady=5)
+    def _card(self, parent, row, title, emoji, color):
+        card = ctk.CTkFrame(parent, corner_radius=14)
+        card.grid(row=row, column=0, sticky="ew", padx=2, pady=8)
         card.grid_columnconfigure(0, weight=1)
-        top = ctk.CTkFrame(card, fg_color="transparent")
-        top.pack(fill="x", padx=14, pady=(9, 0))
-        ctk.CTkLabel(top, text=title, font=("Microsoft YaHei UI", 15, "bold")).pack(side="left")
-        dot = ctk.CTkLabel(top, text="● 检查中...", font=("Microsoft YaHei UI", 12),
+        ctk.CTkLabel(card, text=f"{emoji} {title}",
+                     font=("Microsoft YaHei UI", 16, "bold")).grid(
+            row=0, column=0, sticky="w", padx=18, pady=(14, 2))
+        dot = ctk.CTkLabel(card, text="● 检查中...", font=("Microsoft YaHei UI", 13),
                            text_color=GRAY)
-        dot.pack(side="right")
-        sub = ctk.CTkLabel(card, text="", font=("Microsoft YaHei UI", 11),
-                           text_color=GRAY, anchor="w")
-        sub.pack(fill="x", padx=14, pady=(0, 9))
+        dot.grid(row=1, column=0, sticky="w", padx=18)
+        sub = ctk.CTkLabel(card, text="", font=("Microsoft YaHei UI", 12),
+                           text_color=GRAY, wraplength=260, justify="left")
+        sub.grid(row=2, column=0, sticky="w", padx=18, pady=(0, 12))
         return {"dot": dot, "sub": sub, "color": color}
 
     def _build_body(self):
@@ -354,73 +353,73 @@ class App(ctk.CTk):
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(3, weight=1)
 
-        self.mi_card = self._card(left, 0, "米游社", ACCENT)
-        self.kuro_card = self._card(left, 1, "库街区", GREEN)
-        self.wb_card = self._card(left, 2, "微博超话", AMBER)
+        self.mi_card = self._card(left, 0, "米游社", "", ACCENT)
+        self.kuro_card = self._card(left, 1, "库街区", "", GREEN)
+        self.wb_card = self._card(left, 2, "微博超话", "", AMBER)
 
         # 每日自动执行 + 时间设置
-        next_card = ctk.CTkFrame(left, corner_radius=12)
-        next_card.grid(row=3, column=0, sticky="sew", padx=2, pady=5)
+        next_card = ctk.CTkFrame(left, corner_radius=14)
+        next_card.grid(row=3, column=0, sticky="sew", padx=2, pady=8)
         ctk.CTkLabel(next_card, text="⏰ 每日自动执行",
-                     font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", padx=16, pady=(10, 0))
+                     font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
         self.next_run_label = ctk.CTkLabel(next_card, text="查询中...",
-                                           font=("Consolas", 14), text_color=ACCENT)
-        self.next_run_label.pack(anchor="w", padx=16, pady=(2, 4))
+                                           font=("Consolas", 15), text_color=ACCENT)
+        self.next_run_label.pack(anchor="w", padx=18, pady=(2, 4))
 
         time_row = ctk.CTkFrame(next_card, fg_color="transparent")
-        time_row.pack(fill="x", padx=16, pady=(0, 4))
-        self.time_entry = ctk.CTkEntry(time_row, placeholder_text="00:02", width=96,
-                                       height=30, justify="center", font=("Consolas", 14))
+        time_row.pack(fill="x", padx=18, pady=(0, 4))
+        self.time_entry = ctk.CTkEntry(time_row, placeholder_text="00:02", width=104,
+                                       height=32, justify="center", font=("Consolas", 15))
         self.time_entry.pack(side="left")
-        self.sched_btn = ctk.CTkButton(time_row, text="应用到计划任务", width=124, height=30,
+        self.sched_btn = ctk.CTkButton(time_row, text="应用到计划任务", width=130, height=32,
                                        font=("Microsoft YaHei UI", 12),
                                        command=self.apply_schedule)
         self.sched_btn.pack(side="right")
 
         self.sched_note = ctk.CTkLabel(next_card, text="错过自动补跑 · 签到幂等不重复领取",
                                        font=("Microsoft YaHei UI", 11), text_color=GRAY)
-        self.sched_note.pack(anchor="w", padx=16, pady=(0, 10))
+        self.sched_note.pack(anchor="w", padx=18, pady=(0, 12))
 
         # 右列：操作按钮
         right = ctk.CTkFrame(body, fg_color="transparent")
         right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         right.grid_columnconfigure(0, weight=1)
 
-        self.run_btn = ctk.CTkButton(right, text="🚀 立即签到", height=48,
-                                     font=("Microsoft YaHei UI", 16, "bold"),
+        self.run_btn = ctk.CTkButton(right, text="🚀 立即签到", height=52,
+                                     font=("Microsoft YaHei UI", 17, "bold"),
                                      fg_color=GREEN, hover_color="#16A34A",
                                      command=self.start_checkin)
-        self.run_btn.grid(row=0, column=0, sticky="ew", pady=6)
+        self.run_btn.grid(row=0, column=0, sticky="ew", pady=8)
 
-        ctk.CTkButton(right, text="登录米游社", height=40,
-                      font=("Microsoft YaHei UI", 13),
+        ctk.CTkButton(right, text="登录米游社", height=44,
+                      font=("Microsoft YaHei UI", 14),
                       command=lambda: SMSLoginDialog(self, self, "mihoyo")).grid(
-            row=1, column=0, sticky="ew", pady=5)
-        ctk.CTkButton(right, text="登录库街区", height=40,
-                      font=("Microsoft YaHei UI", 13),
+            row=1, column=0, sticky="ew", pady=6)
+        ctk.CTkButton(right, text="登录库街区", height=44,
+                      font=("Microsoft YaHei UI", 14),
                       command=lambda: SMSLoginDialog(self, self, "kuro")).grid(
-            row=2, column=0, sticky="ew", pady=5)
-        ctk.CTkButton(right, text="登录微博", height=40,
-                      font=("Microsoft YaHei UI", 13),
+            row=2, column=0, sticky="ew", pady=6)
+        ctk.CTkButton(right, text="登录微博", height=44,
+                      font=("Microsoft YaHei UI", 14),
                       command=lambda: WeiboLoginDialog(self, self)).grid(
-            row=3, column=0, sticky="ew", pady=5)
+            row=3, column=0, sticky="ew", pady=6)
 
-        ctk.CTkButton(right, text="🔄 刷新登录状态", height=36,
+        ctk.CTkButton(right, text="🔄 刷新登录状态", height=40,
                       fg_color="#374151", hover_color="#4B5563",
-                      command=self.refresh_status).grid(row=4, column=0, sticky="ew", pady=(12, 5))
-        ctk.CTkButton(right, text="📂 打开日志文件夹", height=36,
+                      command=self.refresh_status).grid(row=4, column=0, sticky="ew", pady=(16, 6))
+        ctk.CTkButton(right, text="📂 打开日志文件夹", height=40,
                       fg_color="#374151", hover_color="#4B5563",
-                      command=lambda: self._open(LOG_DIR)).grid(row=5, column=0, sticky="ew", pady=5)
-        ctk.CTkButton(right, text="⚙️ 打开配置文件", height=36,
+                      command=lambda: self._open(LOG_DIR)).grid(row=5, column=0, sticky="ew", pady=6)
+        ctk.CTkButton(right, text="⚙️ 打开配置文件", height=40,
                       fg_color="#374151", hover_color="#4B5563",
-                      command=lambda: self._open(CONFIG_FILE)).grid(row=6, column=0, sticky="ew", pady=5)
+                      command=lambda: self._open(CONFIG_FILE)).grid(row=6, column=0, sticky="ew", pady=6)
 
         right.grid_rowconfigure(7, weight=1)
 
     def _build_log(self):
-        log_frame = ctk.CTkFrame(self, corner_radius=12, height=210)
-        log_frame.pack(fill="x", padx=24, pady=(2, 14))
-        log_frame.pack_propagate(False)   # 日志区固定高度，任何窗口尺寸下都可见
+        log_frame = ctk.CTkFrame(self, corner_radius=14, height=230)
+        log_frame.pack(fill="x", padx=24, pady=(4, 18))
+        log_frame.pack_propagate(False)   # 日志区固定高度，任何窗口尺寸下都完整可见
         self.log_box = ctk.CTkTextbox(log_frame, font=("Consolas", 12), wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
         self.log_box.insert("end", "欢迎使用 DailyCheckIn！点击「立即签到」开始，或等待每日自动执行。\n")
