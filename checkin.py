@@ -111,6 +111,13 @@ KURO_GAME_UA = (
     "(KHTML, like Gecko) KuroGameBox/2.2.0"
 )
 
+# ──────────────────────────── 微博超话常量 ────────────────────────────
+# 走 m.weibo.cn 移动网页版容器接口（参考 swtmaxx/weibo-auto-checkin 2026-09 实现）
+WB_BASE = "https://m.weibo.cn"
+WB_FOLLOW_REFERER = f"{WB_BASE}/p/index?containerid=100803_-_followsuper"
+WB_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
 log = logging.getLogger("checkin")
 
 
@@ -175,6 +182,10 @@ def load_config() -> dict:
             "token": "", "user_id": "",
             "devcode": "", "distinct_id": "",
             "games": ["wuwa", "pgr"],
+        },
+        "weibo": {
+            "enabled": True,
+            "cookie": "",
         },
     }
     if CONFIG_FILE.exists():
@@ -934,6 +945,203 @@ def kuro_sign() -> bool:
     return all_ok
 
 
+# ════════════════════════════ 微博超话部分 ════════════════════════════
+
+def _wb_ok(payload: dict) -> bool:
+    return payload.get("ok") in (True, 1, "1")
+
+
+def wb_headers(w: dict) -> dict:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": WB_UA,
+        "Referer": WB_FOLLOW_REFERER,
+        "X-Requested-With": "XMLHttpRequest",
+        "Cookie": w["cookie"],
+    }
+    for part in w["cookie"].split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == "XSRF-TOKEN" and value:
+            headers["X-XSRF-TOKEN"] = value
+            break
+    return headers
+
+
+def wb_get(path: str, w: dict, params: dict = None) -> dict:
+    url = path if path.startswith("http") else f"{WB_BASE}{path}"
+    return http_request("GET", url, headers=wb_headers(w), params=params)
+
+
+def wb_normalize_cookie(raw: str) -> str:
+    """规范化粘贴内容：支持整行 Cookie 请求头（cookie: xxx）或原始键值对"""
+    raw = (raw or "").strip()
+    for line in raw.splitlines():
+        if re.match(r"^\s*cookie\s*:", line, flags=re.IGNORECASE):
+            raw = line.split(":", 1)[1].strip()
+            break
+    pairs, seen = [], set()
+    for part in raw.replace("\n", ";").split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, value = part.partition("=")
+        name, value = name.strip(), value.strip()
+        if name and name not in seen:
+            seen.add(name)
+            pairs.append(f"{name}={value}")
+    return "; ".join(pairs)
+
+
+def wb_verify_login(w: dict) -> tuple:
+    """校验微博 Cookie，返回 (是否有效, 昵称或说明)"""
+    data = wb_get("/api/config", w)
+    d = data.get("data") or {}
+    if d.get("login") in (True, 1, "1"):
+        name = d.get("screen_name") or str(d.get("uid") or "未知用户")
+        return True, name
+    return False, "Cookie 已失效或未登录"
+
+
+def wb_fetch_st(w: dict) -> str:
+    data = wb_get("/api/config", w)
+    return str((data.get("data") or {}).get("st") or "")
+
+
+def wb_list_topics(w: dict) -> list:
+    """拉取关注的所有超话及其签到状态，返回 [{name, status, scheme}]"""
+    topics, seen, since_id = [], set(), None
+    for _ in range(100):
+        params = {"containerid": "100803_-_followsuper"}
+        if since_id:
+            params["since_id"] = since_id
+        payload = wb_get("/api/container/getIndex", w, params=params)
+        if not _wb_ok(payload):
+            raise ValueError(payload.get("message") or payload.get("msg") or "接口返回异常")
+        cards = (payload.get("data") or {}).get("cards") or []
+        for card in cards:
+            for item in (card.get("card_group") or []) if isinstance(card, dict) else []:
+                name = str(item.get("title_sub") or item.get("title") or "").strip()
+                if not name:
+                    continue
+                status, scheme = "unknown", None
+                for b in (item.get("buttons") or []):
+                    bname = str(b.get("name") or "").strip()
+                    if bname == "签到":
+                        sch = str(b.get("scheme") or "").strip()
+                        if sch.startswith("/api/container/button"):
+                            status, scheme = "available", sch
+                        break
+                    if "已签" in bname or bname == "明日再来":
+                        status = "signed"
+                        break
+                key = str(item.get("oid") or item.get("topic_id") or item.get("id") or name)
+                if key not in seen:
+                    seen.add(key)
+                    topics.append({"name": name, "status": status, "scheme": scheme})
+        info = (payload.get("data") or {}).get("cardlistInfo") or {}
+        nxt = str(info.get("since_id") or "")
+        if not nxt or nxt == (since_id or ""):
+            break
+        since_id = nxt
+    return topics
+
+
+def wb_do_checkin(w: dict, scheme: str) -> tuple:
+    """执行单个超话签到，返回 (结果状态, 提示信息)；状态：success/already/failed"""
+    payload = wb_get(scheme, w)
+    data = payload.get("data") or {}
+    message = str(data.get("msg") or data.get("tipMessage")
+                  or payload.get("msg") or payload.get("message") or "")
+    if str(payload.get("errno") or "") == "100015" or "验签" in message:
+        st = wb_fetch_st(w)
+        if st:
+            payload = wb_get(scheme, w, params={"st": st})
+            data = payload.get("data") or {}
+            message = str(data.get("msg") or data.get("tipMessage")
+                          or payload.get("msg") or payload.get("message") or "")
+    code = str(payload.get("code") or "")
+    if _wb_ok(payload) or data.get("ok") in (True, 1, "1") or code in ("100000", "382010"):
+        return "success", message or "签到成功"
+    if code == "382004" or "已签" in message or "明日再来" in message:
+        return "already", message or "今日已签到"
+    return "failed", message or "签到失败"
+
+
+def wb_verify_cookie(raw: str) -> tuple:
+    """规范化并校验粘贴的 Cookie，有效则保存，返回 (是否成功, 提示信息)"""
+    cookie = wb_normalize_cookie(raw)
+    if "SUB=" not in cookie:
+        return False, "Cookie 中未找到 SUB 字段，请确认从已登录的微博网页复制"
+    w = CONFIG["weibo"]
+    w["cookie"] = cookie
+    ok, who = wb_verify_login(w)
+    if ok:
+        save_config(CONFIG)
+        return True, f"微博登录成功！昵称：{who}"
+    return False, "Cookie 无效或已失效，请重新复制"
+
+
+def wb_cookie_login() -> None:
+    """微博 Cookie 登录（CLI 交互封装）"""
+    print("\n─── 微博超话登录 ───")
+    print("第一步：浏览器打开 https://m.weibo.cn 并登录")
+    print("        （签到会覆盖你关注的全部超话，包括原神超话）")
+    try:
+        os.startfile("https://m.weibo.cn")
+    except Exception:
+        pass
+    print("第二步：登录后按 F12 →「网络/Network」→ 刷新页面 → 点任意请求 →")
+    print("        在「请求标头」里找到 Cookie 一行，复制整行值")
+    raw = input("第三步：粘贴 Cookie：")
+    ok, msg = wb_verify_cookie(raw)
+    (log.info if ok else log.error)(msg)
+
+
+def weibo_run() -> bool:
+    """微博超话签到：自动签到所有关注且可签的超话（含原神超话）"""
+    w = CONFIG["weibo"]
+    if not w["enabled"]:
+        log.info("微博超话模块未启用，跳过")
+        return True
+    if not w["cookie"]:
+        log.warning("微博尚未登录（缺少 Cookie），请先执行：python checkin.py login")
+        return False
+
+    log.info("正在检查微博登录态...")
+    ok, who = wb_verify_login(w)
+    if not ok:
+        log.error("微博 Cookie 已失效，请重新登录（python checkin.py login 或图形界面）")
+        return False
+    log.info(f"微博登录有效：{who}")
+
+    try:
+        topics = wb_list_topics(w)
+    except Exception as e:
+        log.error(f"获取超话列表失败：{e}")
+        return False
+
+    todo = [t for t in topics if t["status"] == "available"]
+    already = [t for t in topics if t["status"] == "signed"]
+    log.info(f"共关注 {len(topics)} 个超话：待签 {len(todo)}，今日已签 {len(already)}")
+
+    all_ok, success_count = True, 0
+    for t in todo:
+        try:
+            status, msg = wb_do_checkin(w, t["scheme"])
+            if status in ("success", "already"):
+                log.info(f"超话签到 [{t['name']}]：{msg}")
+                success_count += status == "success"
+            else:
+                log.warning(f"超话签到 [{t['name']}]：失败（{msg}）")
+                all_ok = False
+        except Exception as e:
+            log.warning(f"超话签到 [{t['name']}]：异常（{e}）")
+            all_ok = False
+        time.sleep(random.randint(2, 5))
+    log.info(f"微博超话：本次成功 {success_count}，之前已签 {len(already)}")
+    return all_ok
+
+
 # ════════════════════════════ 主流程 ════════════════════════════
 
 def cmd_run() -> int:
@@ -941,6 +1149,7 @@ def cmd_run() -> int:
     results = []
     results.append(("米游社", mihoyo_run()))
     results.append(("库街区", kuro_sign()))
+    results.append(("微博超话", weibo_run()))
     log.info("══════════════ 执行汇总 ══════════════")
     for name, ok in results:
         log.info(f"  {name}：{'完成' if ok else '存在失败项，详见上方日志'}")
@@ -970,6 +1179,13 @@ def cmd_test() -> int:
             log.info(f"库街区 token：状态异常（{mine.get('code')} {mine.get('message')}）")
     else:
         log.info("库街区：未登录")
+
+    w = CONFIG["weibo"]
+    if w["cookie"]:
+        ok, who = wb_verify_login(w)
+        log.info(f"微博 Cookie：{'有效，昵称：' + who if ok else '已失效，请重新复制'}")
+    else:
+        log.info("微博：未登录")
     return 0
 
 
@@ -1012,6 +1228,12 @@ def main() -> int:
                 kuro_sms_login()
             except (KeyboardInterrupt, EOFError):
                 log.info("已跳过库街区登录")
+        try:
+            answer = input("\n是否配置微博超话签到？(Y/n)：").strip().lower()
+            if answer != "n":
+                wb_cookie_login()
+        except (KeyboardInterrupt, EOFError):
+            log.info("已跳过微博登录")
         log.info("登录流程结束。可执行 python checkin.py test 校验登录状态")
         return 0
     if args.command == "test":

@@ -22,6 +22,7 @@
 | 🌈 **米游社** | 米游币打卡 | 多分区打卡（原神 / 星穹铁道 / 绝区零等，可配置），自动统计米游币收益 |
 | 🌈 **米游社** | 游戏签到领福利 | 原神、崩坏：星穹铁道、绝区零、崩坏3，自动识别全部已绑定角色并签到，播报当日奖励 |
 | 🔴 **库街区** | 每日补给签到 | 鸣潮、战双帕弥什，自动识别绑定角色，播报签到奖励 |
+| 🟠 **微博** | 超话签到 | 自动签到**你关注的全部超话**（含原神超话），逐个播报结果 |
 
 **特点：**
 
@@ -81,6 +82,7 @@ python checkin.py login
 |---|---|
 | **米游社** | ① 短信验证码登录（**推荐**，全部功能可用）；② App 扫码（⚠️ 2026-09 起米哈游限制了扫码 token 的米游社接口权限，仅游戏签到可用） |
 | **库街区** | 工具自动打开官网 → 右上角「登录」→ 弹窗内获取短信验证码（网页上的「登录」按钮不用点）→ 把验证码输回命令行 |
+| **微博** | 打开 https://m.weibo.cn 登录 → F12 →「网络」→ 刷新 → 点任意请求 → 复制请求标头里 `Cookie` 整行 → 粘贴回工具（图形界面直接粘贴到弹窗里） |
 
 ### 3️⃣ 挂上定时任务
 
@@ -136,6 +138,11 @@ python checkin.py login  # 重新登录（凭证过期时用）
 图形界面里选好时分点「应用」即改即生效；若用 bat 方式，要编辑其中的 <code>/ST 00:02</code> 参数（注意不是下方提示文案），然后重新双击运行。
 </details>
 
+<details>
+<summary><b>微博超话签到提示 Cookie 失效</b></summary>
+微博网页登录态一般可维持数月。失效后重新在 <code>m.weibo.cn</code> 登录并按上面的方法复制 Cookie，图形界面里粘贴重新验证即可。
+</details>
+
 ## 📁 项目结构
 
 ```
@@ -160,6 +167,7 @@ DailyCheckIn/
 - [mxyooR/Kuro-autosignin](https://github.com/mxyooR/Kuro-autosignin) · [mxyooR/Kuro_login](https://github.com/mxyooR/Kuro_login) —— 库街区签到与短信登录
 - [starudream/sign-task](https://github.com/starudream/sign-task) —— stoken 渠道作用域问题定位
 - [MR-LIYA/MHY_Scanner](https://github.com/MR-LIYA/MHY_Scanner) —— 米哈游 passport 短信登录与 RSA 实现
+- [swtmaxx/weibo-auto-checkin](https://github.com/swtmaxx/weibo-auto-checkin) —— 微博 m.weibo.cn 超话容器接口与 st 验签流程
 
 ## ⚠️ 免责声明
 

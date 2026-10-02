@@ -26,8 +26,8 @@ import checkin
 from checkin import (
     CONFIG_FILE, LOG_DIR, ROOT, KURO_MINE_URL,
     load_config, setup_logging, log,
-    mihoyo_run, kuro_sign, cmd_run,
-    mi_ensure_web_auth, kuro_request, kuro_user_headers,
+    mihoyo_run, kuro_sign, cmd_run, weibo_run,
+    mi_ensure_web_auth, kuro_request, kuro_user_headers, wb_verify_login, wb_verify_cookie,
     mi_sms_send, mi_sms_verify, kuro_sms_verify,
 )
 
@@ -38,6 +38,7 @@ ACCENT = "#3B82F6"
 GREEN = "#22C55E"
 RED = "#EF4444"
 GRAY = "#9CA3AF"
+AMBER = "#F59E0B"
 
 KURO_HOME_URL = "https://www.kurobbs.com/"
 
@@ -168,6 +169,80 @@ class SMSLoginDialog(ctk.CTkToplevel):
         threading.Thread(target=worker, daemon=True).start()
 
 
+class WeiboLoginDialog(ctk.CTkToplevel):
+    """微博 Cookie 登录弹窗"""
+
+    def __init__(self, master, app: "App"):
+        super().__init__(master)
+        self.app = app
+        self.title("登录微博")
+        self.geometry("540x480")
+        self.resizable(False, False)
+        self.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self, text="微博 · 超话签到登录",
+                     font=("Microsoft YaHei UI", 18, "bold")).grid(
+            row=0, column=0, padx=24, pady=(24, 4), sticky="w")
+        hint = ("第一步：点下方按钮打开微博网页版并登录\n"
+                "第二步：登录后按 F12 →「网络/Network」→ 刷新页面 → 点任意请求 →\n"
+                "在「请求标头」里找到 Cookie 一行，整行复制粘贴到下面\n"
+                "签到会覆盖你关注的全部超话（包括原神超话）")
+        ctk.CTkLabel(self, text=hint, wraplength=470, justify="left",
+                     text_color=GRAY, font=("Microsoft YaHei UI", 12)).grid(
+            row=1, column=0, padx=24, pady=(0, 10), sticky="w")
+
+        ctk.CTkButton(self, text="打开微博网页版", height=36,
+                      fg_color="#4B5563", hover_color="#374151",
+                      command=lambda: self._open("https://m.weibo.cn")).grid(
+            row=2, column=0, padx=24, pady=(0, 10), sticky="ew")
+
+        self.cookie_box = ctk.CTkTextbox(self, height=90, font=("Consolas", 12))
+        self.cookie_box.grid(row=3, column=0, padx=24, pady=(0, 10), sticky="ew")
+
+        self.save_btn = ctk.CTkButton(self, text="保存并验证", height=42,
+                                      font=("Microsoft YaHei UI", 14, "bold"),
+                                      command=self.do_save)
+        self.save_btn.grid(row=4, column=0, padx=24, pady=(0, 4), sticky="ew")
+
+        self.status = ctk.CTkLabel(self, text="", wraplength=470, justify="left",
+                                   font=("Microsoft YaHei UI", 12))
+        self.status.grid(row=5, column=0, padx=24, pady=(4, 16), sticky="ew")
+
+        self.transient(master)
+        self.lift()
+        self.after(200, self.grab_set)
+
+    @staticmethod
+    def _open(url: str):
+        try:
+            os.startfile(url)
+        except Exception:
+            pass
+
+    def do_save(self):
+        raw = self.cookie_box.get("1.0", "end").strip()
+        if not raw:
+            self.status.configure(text="请先粘贴 Cookie", text_color=RED)
+            return
+        self.save_btn.configure(state="disabled")
+        self.status.configure(text="正在验证 Cookie...", text_color=GRAY)
+
+        def worker():
+            ok, msg = wb_verify_cookie(raw)
+            checkin.log.info(msg)
+
+            def ui():
+                self.status.configure(text=msg, text_color=GREEN if ok else RED)
+                self.save_btn.configure(state="normal")
+                if ok:
+                    self.app.refresh_status()
+                    self.after(1500, self.destroy)
+
+            self.app.ui_queue.put(ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -238,10 +313,11 @@ class App(ctk.CTk):
 
         self.mi_card = self._card(left, 0, "米游社", "", ACCENT)
         self.kuro_card = self._card(left, 1, "库街区", "", GREEN)
+        self.wb_card = self._card(left, 2, "微博超话", "", AMBER)
 
         # 每日自动执行 + 时间设置
         next_card = ctk.CTkFrame(left, corner_radius=14)
-        next_card.grid(row=2, column=0, sticky="sew", padx=2, pady=8)
+        next_card.grid(row=3, column=0, sticky="sew", padx=2, pady=8)
         ctk.CTkLabel(next_card, text="⏰ 每日自动执行",
                      font=("Microsoft YaHei UI", 14, "bold")).pack(anchor="w", padx=18, pady=(12, 0))
         self.next_run_label = ctk.CTkLabel(next_card, text="查询中...",
@@ -281,18 +357,22 @@ class App(ctk.CTk):
                       font=("Microsoft YaHei UI", 14),
                       command=lambda: SMSLoginDialog(self, self, "kuro")).grid(
             row=2, column=0, sticky="ew", pady=6)
+        ctk.CTkButton(right, text="登录微博", height=44,
+                      font=("Microsoft YaHei UI", 14),
+                      command=lambda: WeiboLoginDialog(self, self)).grid(
+            row=3, column=0, sticky="ew", pady=6)
 
         ctk.CTkButton(right, text="🔄 刷新登录状态", height=40,
                       fg_color="#374151", hover_color="#4B5563",
-                      command=self.refresh_status).grid(row=3, column=0, sticky="ew", pady=(16, 6))
+                      command=self.refresh_status).grid(row=4, column=0, sticky="ew", pady=(16, 6))
         ctk.CTkButton(right, text="📂 打开日志文件夹", height=40,
                       fg_color="#374151", hover_color="#4B5563",
-                      command=lambda: self._open(LOG_DIR)).grid(row=4, column=0, sticky="ew", pady=6)
+                      command=lambda: self._open(LOG_DIR)).grid(row=5, column=0, sticky="ew", pady=6)
         ctk.CTkButton(right, text="⚙️ 打开配置文件", height=40,
                       fg_color="#374151", hover_color="#4B5563",
-                      command=lambda: self._open(CONFIG_FILE)).grid(row=5, column=0, sticky="ew", pady=6)
+                      command=lambda: self._open(CONFIG_FILE)).grid(row=6, column=0, sticky="ew", pady=6)
 
-        right.grid_rowconfigure(6, weight=1)
+        right.grid_rowconfigure(7, weight=1)
 
     def _build_log(self):
         log_frame = ctk.CTkFrame(self, corner_radius=14)
@@ -334,8 +414,15 @@ class App(ctk.CTk):
                 kuro_ok = mine.get("code") == 200
                 kuro_note = (f"用户 ID={k.get('user_id', '?')}" if kuro_ok
                              else "token 已过期，请重新登录")
+            wb_ok = False
+            wb_note = "尚未登录，点击右侧按钮登录"
+            w = cfg["weibo"]
+            if w["cookie"]:
+                wb_ok, who = wb_verify_login(w)
+                wb_note = f"昵称：{who}" if wb_ok else "Cookie 已失效，请重新登录"
             self.ui_queue.put(lambda: (self._set_dot(self.mi_card, mi_ok, mi_note),
-                                       self._set_dot(self.kuro_card, kuro_ok, kuro_note)))
+                                       self._set_dot(self.kuro_card, kuro_ok, kuro_note),
+                                       self._set_dot(self.wb_card, wb_ok, wb_note)))
 
         threading.Thread(target=worker, daemon=True).start()
 
