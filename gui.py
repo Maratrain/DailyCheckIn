@@ -25,7 +25,7 @@ import customtkinter as ctk
 import checkin
 from checkin import (
     CONFIG_FILE, LOG_DIR, ROOT, KURO_MINE_URL,
-    load_config, setup_logging, log,
+    load_config, setup_logging, log, today_done_summary,
     mihoyo_run, kuro_sign, cmd_run, weibo_run,
     mi_ensure_web_auth, kuro_request, kuro_user_headers, wb_verify_login, wb_verify_cookie,
     mi_sms_send, mi_sms_verify, kuro_sms_verify,
@@ -266,7 +266,19 @@ class App(ctk.CTk):
         self.after(120, self._poll)
         self.after(300, self.refresh_status)
         self.after(300, self.refresh_next_run)
+        self.after(600, self.update_run_btn)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def update_run_btn(self):
+        """今日启用模块全部签完时，按钮显示已完成状态（仍可点击，执行时只会跳过）"""
+        try:
+            summary = today_done_summary()
+        except Exception:
+            return
+        if summary and all(summary.values()):
+            self.run_btn.configure(text="✅ 今日已全部签到", fg_color="#16A34A")
+        else:
+            self.run_btn.configure(text="🚀 立即签到", fg_color=GREEN)
 
     # ────────── 界面构建 ──────────
     def _build_header(self):
@@ -541,7 +553,8 @@ class App(ctk.CTk):
 
     def _finish_checkin(self):
         self.running = False
-        self.run_btn.configure(text="🚀 立即签到", state="normal", fg_color=GREEN)
+        self.run_btn.configure(state="normal")
+        self.update_run_btn()
         self.refresh_status()
         self.refresh_next_run()
 

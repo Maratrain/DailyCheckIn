@@ -30,6 +30,7 @@
 - 🖥️ **可选图形界面** —— 深色桌面 GUI（CustomTkinter），状态卡片 + 一键签到 + 登录弹窗 + 实时日志，**每日自动执行时间可在界面里直接改**
 - 📦 **单文件核心** —— `checkin.py` 一个文件搞定签到，除 `requests` 外零第三方依赖（RSA 加密为纯标准库实现）
 - ⏰ **双保险定时** —— Windows 计划任务每天定时执行 + 开机自启补跑；错过补跑（`StartWhenAvailable`），电脑没开机也不漏签
+- 🧷 **已签状态记录** —— 当日确认签到后写入本地状态（`state.json`），同一天再运行直接跳过，一个请求都不发
 - 🔄 **自动续期** —— 米游社 cookie_token 过期自动用 stoken 续期，长期免维护
 - 📝 **中文日志** —— 每一步都有进度提示，按天写入 `logs/`
 
@@ -141,6 +142,11 @@ python checkin.py login  # 重新登录（凭证过期时用）
 <details>
 <summary><b>微博超话签到提示 Cookie 失效</b></summary>
 微博网页登录态一般可维持数月。失效后重新在 <code>m.weibo.cn</code> 登录并按上面的方法复制 Cookie，图形界面里粘贴重新验证即可。
+</details>
+
+<details>
+<summary><b>想强制重新签到怎么办</b></summary>
+正常情况下当天确认签到后会记入 <code>state.json</code>，再次运行直接跳过。若想强制重跑（例如白天新绑定了游戏角色），删除目录下的 <code>state.json</code> 再运行即可。
 </details>
 
 ## 📁 项目结构

@@ -37,6 +37,7 @@ import requests
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_FILE = ROOT / "config.json"
+STATE_FILE = ROOT / "state.json"
 LOG_DIR = ROOT / "logs"
 
 TIMEOUT = 20
@@ -205,6 +206,57 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+# ──────────────────────────── 已签状态记录 ────────────────────────────
+# state.json 按天记录各模块的完成情况：当天已确认签到的模块，后续运行直接跳过，
+# 不再发任何请求。只有模块整体成功（含服务端返回"已签"）才会标记。
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_state(state: dict) -> None:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def is_done(module: str, fingerprint: str = "") -> bool:
+    state = load_state()
+    today = f"{datetime.now():%Y-%m-%d}"
+    if state.get("date") != today:
+        return False
+    return state.get(module) is True and state.get(module + "_fp", "") == fingerprint
+
+
+def mark_done(module: str, fingerprint: str = "") -> None:
+    state = load_state()
+    today = f"{datetime.now():%Y-%m-%d}"
+    if state.get("date") != today:
+        state = {"date": today}
+    state[module] = True
+    state[module + "_fp"] = fingerprint
+    save_state(state)
+
+
+def today_done_summary() -> dict:
+    """今日各模块完成情况（供 GUI 显示）；未启用的模块视为已完成"""
+    m = CONFIG["mihoyo"]
+    k = CONFIG["kuro"]
+    w = CONFIG["weibo"]
+    return {
+        "米游币打卡": (not m["enabled"] or not m["bbs_checkin"])
+                      or is_done("mihoyo_bbs", ",".join(sorted(str(g) for g in m["bbs_gids"]))),
+        "游戏签到": (not m["enabled"]) or is_done("mihoyo_game", ",".join(sorted(m["game_sign"]))),
+        "库街区": (not k["enabled"]) or is_done("kuro", ",".join(sorted(k["games"]))),
+        "微博超话": (not w["enabled"]) or is_done("weibo"),
+    }
 
 
 # 统一使用的会话：忽略系统/环境变量代理（米哈游与库街区均为国内接口，
@@ -760,11 +812,25 @@ def mihoyo_run() -> bool:
         return False
 
     ok = True
+    fp_bbs = ",".join(sorted(str(g) for g in m["bbs_gids"]))
+    fp_game = ",".join(sorted(m["game_sign"]))
     # 米游币打卡只依赖 stoken，放在最前且不依赖网页端登录态
     if m["bbs_checkin"]:
-        ok = mi_bbs_checkin(m) and ok
+        if is_done("mihoyo_bbs", fp_bbs):
+            log.info("米游币打卡：今日已完成（本地记录），跳过")
+        else:
+            if mi_bbs_checkin(m):
+                mark_done("mihoyo_bbs", fp_bbs)
+            else:
+                ok = False
     if mi_ensure_web_auth(m):
-        ok = mi_game_sign(m) and ok
+        if is_done("mihoyo_game", fp_game):
+            log.info("游戏签到：今日已完成（本地记录），跳过")
+        else:
+            if mi_game_sign(m):
+                mark_done("mihoyo_game", fp_game)
+            else:
+                ok = False
     else:
         log.error("米游社网页端登录态不可用，本次跳过游戏签到（cookie_token 会在下次运行时自动重试）")
         ok = False
@@ -892,6 +958,10 @@ def kuro_sign() -> bool:
 
     all_ok = True
     current_month = datetime.now().strftime("%m")
+    fp = ",".join(sorted(k["games"]))
+    if is_done("kuro", fp):
+        log.info("库街区每日补给：今日已完成（本地记录），跳过")
+        return True
     for game_key in k["games"]:
         game = KURO_GAMES.get(game_key)
         if not game:
@@ -942,6 +1012,8 @@ def kuro_sign() -> bool:
                 log.warning(f"库街区 {name} [{role_name}]：签到失败"
                             f"（{code} {result.get('message')}）")
                 all_ok = False
+    if all_ok:
+        mark_done("kuro", fp)
     return all_ok
 
 
@@ -1106,6 +1178,9 @@ def weibo_run() -> bool:
     if not w["cookie"]:
         log.warning("微博尚未登录（缺少 Cookie），请先执行：python checkin.py login")
         return False
+    if is_done("weibo"):
+        log.info("微博超话：今日已完成（本地记录），跳过")
+        return True
 
     log.info("正在检查微博登录态...")
     ok, who = wb_verify_login(w)
@@ -1139,6 +1214,8 @@ def weibo_run() -> bool:
             all_ok = False
         time.sleep(random.randint(2, 5))
     log.info(f"微博超话：本次成功 {success_count}，之前已签 {len(already)}")
+    if all_ok:
+        mark_done("weibo")
     return all_ok
 
 
