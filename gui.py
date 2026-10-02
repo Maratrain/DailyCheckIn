@@ -277,8 +277,8 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("DailyCheckIn · 每日自动签到")
-        self.geometry("1020x880")
-        self.minsize(880, 800)
+        self.geometry("1020x815")
+        self.minsize(860, 812)
 
         self.log_queue = queue.Queue()
         self.ui_queue = queue.Queue()
@@ -313,7 +313,7 @@ class App(ctk.CTk):
     # ────────── 界面构建 ──────────
     def _build_header(self):
         bar = ctk.CTkFrame(self, fg_color="transparent", height=70)
-        bar.pack(fill="x", padx=24, pady=(18, 6))
+        bar.pack(fill="x", padx=24, pady=(12, 4))
         ctk.CTkLabel(bar, text="🗓️ DailyCheckIn",
                      font=("Microsoft YaHei UI", 26, "bold")).pack(side="left")
         ctk.CTkLabel(bar, text="米游社 · 库街区 · 微博超话 每日自动签到",
@@ -417,8 +417,8 @@ class App(ctk.CTk):
         right.grid_rowconfigure(7, weight=1)
 
     def _build_log(self):
-        log_frame = ctk.CTkFrame(self, corner_radius=14, height=230)
-        log_frame.pack(fill="x", padx=24, pady=(4, 18))
+        log_frame = ctk.CTkFrame(self, corner_radius=14, height=190)
+        log_frame.pack(fill="x", padx=24, pady=(2, 12))
         log_frame.pack_propagate(False)   # 日志区固定高度，任何窗口尺寸下都完整可见
         self.log_box = ctk.CTkTextbox(log_frame, font=("Consolas", 12), wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=8, pady=8)
