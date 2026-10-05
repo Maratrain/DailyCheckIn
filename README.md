@@ -27,11 +27,12 @@
 **特点：**
 
 - 🔐 **零抓包** —— 米游社用短信验证码 / App 扫码登录，库街区用短信验证码登录，全程不需要 Charles/Fiddler
-- 🖥️ **可选图形界面** —— 深色桌面 GUI（CustomTkinter），状态卡片 + 一键签到 + 登录弹窗 + 实时日志，**每日自动执行时间可在界面里直接改**
+- 🖥️ **可选图形界面** —— 深色桌面 GUI（CustomTkinter），状态卡片 + 一键签到 + 登录弹窗 + 推送设置 + 实时日志，**每日自动执行时间可在界面里直接改**
 - 📦 **单文件核心** —— `checkin.py` 一个文件搞定签到，除 `requests` 外零第三方依赖（RSA 加密为纯标准库实现）
 - ⏰ **双保险定时** —— Windows 计划任务每天定时执行 + 开机自启补跑；错过补跑（`StartWhenAvailable`），电脑没开机也不漏签
 - 🧷 **已签状态记录** —— 当日确认签到后写入本地状态（`state.json`），同一天再运行直接跳过，一个请求都不发
 - 🔄 **自动续期** —— 米游社 cookie_token 过期自动用 stoken 续期，长期免维护
+- 📬 **完成状态推送** —— 签到结束后通过 [OnePush](https://github.com/y1ndan/onepush) 把结果推送到手机（Bark / Server酱 / Telegram / 企业微信 / 钉钉 / 邮件等），失败与否一目了然
 - 📝 **中文日志** —— 每一步都有进度提示，按天写入 `logs/`
 
 ## 📸 运行效果
@@ -50,6 +51,7 @@
 ══════════════ 执行汇总 ══════════════
   米游社：完成
   库街区：完成
+OnePush 推送成功（bark）
 ```
 
 ## 🖥️ 图形界面预览
@@ -113,9 +115,37 @@ python checkin.py login  # 重新登录（凭证过期时用）
   },
   "kuro": {
     "games": ["wuwa", "pgr"]            // 库街区每日补给：鸣潮 / 战双帕弥什
+  },
+  "onepush": {
+    "enabled": true,                    // 开启完成状态推送（需 pip install onepush）
+    "provider": "bark",                 // 推送通道，常用通道见下表
+    "params": {}                        // 通道参数；推荐点图形界面「推送设置」按钮填写，字段留空即可
   }
 }
 ```
+
+<details>
+<summary><b>onepush 常用通道与参数</b></summary>
+
+| provider | 通道 | params 必填参数 |
+|---|---|---|
+| `bark` | Bark（iOS） | `key`（App 里复制的推送 Key，也可填完整推送 URL） |
+| `serverchan` | Server酱·老版 | `sckey` |
+| `serverchanturbo` | Server酱³ | `sctkey` |
+| `pushplus` | pushplus | `token` |
+| `telegram` | Telegram Bot | `token`、`userid` |
+| `wechatworkapp` | 企业微信应用 | `corpid`、`corpsecret`、`agentid` |
+| `wechatworkbot` | 企业微信机器人 | `key`（也可直接粘贴完整 webhook 地址） |
+| `dingtalk` | 钉钉群机器人 | `token`（也可粘贴完整 webhook 地址；加签的再填 `secret`） |
+| `lark` | 飞书群机器人 | `webhook` |
+| `discord` | Discord Webhook | `webhook` |
+| `qmsg` | Qmsg酱（QQ） | `key` |
+| `pushdeer` | PushDeer | `pushkey` |
+| `smtp` | 邮件 | `host`、`user`、`password` |
+| `custom` | 自定义接口 | `url` |
+
+完整参数（含可选参数）见 [OnePush 文档](https://github.com/y1ndan/onepush#notifier)。也可以直接点图形界面里的「📬 推送设置」按钮可视化配置并发送测试推送。每次运行签到（计划任务 / 命令行 / 图形界面）结束后都会推送一次；推送失败只记日志，不影响签到本身。
+</details>
 
 ## ❓ 常见问题
 

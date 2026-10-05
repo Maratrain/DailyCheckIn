@@ -10,6 +10,7 @@
 启动：python gui.py  （或双击 启动界面.bat）
 """
 
+import json
 import logging
 import os
 import queue
@@ -25,7 +26,7 @@ import customtkinter as ctk
 import checkin
 from checkin import (
     CONFIG_FILE, LOG_DIR, ROOT, KURO_MINE_URL,
-    load_config, setup_logging, log, today_done_summary,
+    load_config, save_config, setup_logging, log, today_done_summary,
     mihoyo_run, kuro_sign, cmd_run, weibo_run,
     mi_ensure_web_auth, kuro_request, kuro_user_headers,
     wb_verify_login, wb_verify_cookie, wb_browser_login,
@@ -273,6 +274,260 @@ class WeiboLoginDialog(ctk.CTkToplevel):
         threading.Thread(target=worker, daemon=True).start()
 
 
+class PushConfigDialog(ctk.CTkToplevel):
+    """OnePush 推送设置弹窗：选通道、填参数、测试推送、保存"""
+
+    PROVIDER_NAMES = {
+        "bark": "Bark（iOS）",
+        "serverchan": "Server酱（老版）",
+        "serverchanturbo": "Server酱³",
+        "pushplus": "pushplus",
+        "telegram": "Telegram Bot",
+        "wechatworkapp": "企业微信应用",
+        "wechatworkbot": "企业微信机器人",
+        "dingtalk": "钉钉群机器人",
+        "lark": "飞书群机器人",
+        "discord": "Discord",
+        "qmsg": "Qmsg酱（QQ）",
+        "pushdeer": "PushDeer",
+        "smtp": "邮件（SMTP）",
+        "gocqhttp": "go-cqhttp",
+        "custom": "自定义接口",
+    }
+
+    # 各通道参数框的灰色提示（点击输入即自动消失；未输入时 get() 返回空，不会被保存）
+    PARAM_PLACEHOLDERS = {
+        ("bark", "key"): "推送 Key，或直接粘贴完整推送 URL",
+        ("wechatworkbot", "key"): "机器人 key，或直接粘贴完整 webhook 地址",
+        ("dingtalk", "token"): "access_token，或直接粘贴完整 webhook 地址",
+        ("lark", "webhook"): "完整 webhook 地址",
+        ("discord", "webhook"): "完整 webhook 地址",
+        ("telegram", "token"): "BotFather 发的 token，如 123456:ABC-DEF...",
+        ("telegram", "userid"): "chat_id（可向 @userinfobot 发消息查询）",
+        ("pushplus", "token"): "pushplus 官网复制的 token",
+        ("serverchan", "sckey"): "Server酱官网复制的 SCKEY",
+        ("serverchanturbo", "sctkey"): "Server酱³ 官网复制的 SendKey",
+        ("wechatworkapp", "corpid"): "企业 ID（我的企业 → 企业信息）",
+        ("wechatworkapp", "corpsecret"): "应用的 Secret",
+        ("wechatworkapp", "agentid"): "应用的 AgentId",
+        ("smtp", "host"): "如 smtp.qq.com",
+        ("smtp", "user"): "发件邮箱地址",
+        ("smtp", "password"): "邮箱授权码（非登录密码）",
+        ("pushdeer", "pushkey"): "PushDeer 复制的 PushKey",
+        ("qmsg", "key"): "Qmsg酱官网复制的 key",
+        ("custom", "url"): "自定义接口完整 URL",
+    }
+
+    def __init__(self, master, app: "App"):
+        super().__init__(master)
+        self.app = app
+        self.title("推送设置")
+        self.geometry("540x600")
+        self.resizable(False, False)
+        self.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self, text="📬 推送设置 · OnePush",
+                     font=("Microsoft YaHei UI", 18, "bold")).grid(
+            row=0, column=0, padx=24, pady=(20, 2), sticky="w")
+        ctk.CTkLabel(self, text="开启后，每次签到结束会把完成状态推送到所选通道。",
+                     wraplength=470, justify="left", text_color=GRAY,
+                     font=("Microsoft YaHei UI", 12)).grid(
+            row=1, column=0, padx=24, pady=(0, 10), sticky="w")
+
+        try:
+            from onepush import all_providers, get_notifier
+            self._notifier = get_notifier
+            available = set(all_providers())
+        except ImportError:
+            available = None
+        if available is None:
+            ctk.CTkLabel(self, text="未安装 onepush 库，请先在命令行执行：\n\npip install onepush",
+                         text_color=RED, justify="center",
+                         font=("Microsoft YaHei UI", 13)).grid(
+                row=2, column=0, padx=24, pady=24)
+            ctk.CTkButton(self, text="关闭", command=self.destroy).grid(
+                row=3, column=0, padx=24, pady=(0, 20), sticky="ew")
+            return
+
+        cfg = checkin.CONFIG.get("onepush") or {}
+        self.saved_params = dict(cfg.get("params") or {})
+        self._provider = str(cfg.get("provider") or "bark")
+
+        # 常用通道排前面，未知通道也保留可选
+        preferred = ["bark", "serverchan", "serverchanturbo", "pushplus", "telegram",
+                     "wechatworkapp", "wechatworkbot", "dingtalk", "lark"]
+        self.providers = [p for p in preferred if p in available] \
+            + sorted(available - set(preferred))
+        if self._provider not in self.providers:
+            self.providers.insert(0, self._provider)
+
+        # 启用开关 + 通道下拉
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.grid(row=2, column=0, padx=24, pady=(0, 8), sticky="ew")
+        top.grid_columnconfigure(1, weight=1)
+        self.enabled_switch = ctk.CTkSwitch(top, text="启用推送",
+                                            font=("Microsoft YaHei UI", 14),
+                                            progress_color=GREEN)
+        if cfg.get("enabled"):
+            self.enabled_switch.select()
+        self.enabled_switch.grid(row=0, column=0, sticky="w")
+        self.provider_menu = ctk.CTkOptionMenu(
+            top, width=200, font=("Microsoft YaHei UI", 13),
+            values=[self.PROVIDER_NAMES.get(p, p) for p in self.providers],
+            command=self._on_provider_change)
+        self.provider_menu.set(self.PROVIDER_NAMES.get(self._provider, self._provider))
+        self.provider_menu.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkLabel(self, text="通道参数（必填项）", font=("Microsoft YaHei UI", 12),
+                     text_color=GRAY, anchor="w").grid(
+            row=3, column=0, padx=24, pady=(2, 0), sticky="w")
+        self.params_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.params_frame.grid(row=4, column=0, padx=24, pady=(2, 0), sticky="ew")
+        self.params_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self, text="额外参数（JSON，选填，如 bark 的 sound / group）",
+                     font=("Microsoft YaHei UI", 12), text_color=GRAY,
+                     anchor="w").grid(row=5, column=0, padx=24, pady=(8, 0), sticky="w")
+        self.extra_box = ctk.CTkTextbox(self, height=64, font=("Consolas", 12))
+        self.extra_box.grid(row=6, column=0, padx=24, pady=(2, 0), sticky="ew")
+
+        self.status = ctk.CTkLabel(self, text="", wraplength=470, justify="left",
+                                   font=("Microsoft YaHei UI", 12))
+        self.status.grid(row=7, column=0, padx=24, pady=(8, 0), sticky="ew")
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.grid(row=8, column=0, padx=24, pady=(10, 16), sticky="ew")
+        btns.grid_columnconfigure(0, weight=1)
+        btns.grid_columnconfigure(1, weight=1)
+        self.test_btn = ctk.CTkButton(btns, text="📤 发送测试推送", height=42,
+                                      font=("Microsoft YaHei UI", 13),
+                                      fg_color="#374151", hover_color="#4B5563",
+                                      command=self.do_test)
+        self.test_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.save_btn = ctk.CTkButton(btns, text="💾 保存", height=42,
+                                      font=("Microsoft YaHei UI", 14, "bold"),
+                                      command=self.do_save)
+        self.save_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        self._build_params(self.saved_params)
+        self.transient(master)
+        self.lift()
+        self.after(200, self.grab_set)
+
+    # ────────── 参数区 ──────────
+    def _required_params(self, provider: str) -> list:
+        try:
+            req = self._notifier(provider).params.get("required", [])
+        except Exception:
+            return []
+        return [p for p in req if p not in ("title", "content")]
+
+    def _build_params(self, filled: dict):
+        """按当前通道重建必填参数输入框，多余参数放进额外参数 JSON"""
+        for w in self.params_frame.winfo_children():
+            w.destroy()
+        self.param_entries = {}
+        for i, name in enumerate(self._required_params(self._provider)):
+            ctk.CTkLabel(self.params_frame, text=name,
+                         font=("Consolas", 13)).grid(
+                row=i, column=0, sticky="w", padx=(0, 10), pady=4)
+            hint = self.PARAM_PLACEHOLDERS.get((self._provider, name), f"填写 {name}")
+            entry = ctk.CTkEntry(self.params_frame, height=34,
+                                 font=("Consolas", 13), placeholder_text=hint)
+            if filled.get(name):
+                entry.insert(0, str(filled[name]))
+            entry.grid(row=i, column=1, sticky="ew", pady=4)
+            self.param_entries[name] = entry
+        if not self.param_entries:
+            ctk.CTkLabel(self.params_frame, text="（该通道无必填参数）", text_color=GRAY,
+                         font=("Microsoft YaHei UI", 12)).grid(
+                row=0, column=0, sticky="w")
+        extras = {k: v for k, v in filled.items() if k not in self.param_entries}
+        self.extra_box.delete("1.0", "end")
+        if extras:
+            self.extra_box.insert("1.0", json.dumps(extras, ensure_ascii=False, indent=2))
+
+    def _key_from_label(self, label: str) -> str:
+        for key in self.providers:
+            if self.PROVIDER_NAMES.get(key, key) == label:
+                return key
+        return label
+
+    def _on_provider_change(self, label: str):
+        # 切换通道前先收集当前已填内容，尽量不丢输入
+        current, _ = self._gather_params()
+        merged = dict(self.saved_params)
+        merged.update(current or {})
+        self._provider = self._key_from_label(label)
+        self._build_params(merged)
+
+    def _gather_params(self) -> tuple:
+        """收集界面参数，返回 (params, 错误信息)"""
+        params = {}
+        for name, entry in getattr(self, "param_entries", {}).items():
+            val = entry.get().strip()
+            if val:
+                params[name] = val
+        raw = self.extra_box.get("1.0", "end").strip()
+        if raw:
+            try:
+                extras = json.loads(raw)
+            except json.JSONDecodeError as e:
+                return None, f"额外参数 JSON 有误：{e}"
+            if not isinstance(extras, dict):
+                return None, '额外参数需为 JSON 对象，如 {"sound": "bell"}'
+            params.update({str(k): v for k, v in extras.items()})
+        return params, ""
+
+    # ────────── 测试 / 保存 ──────────
+    def do_test(self):
+        params, err = self._gather_params()
+        if err:
+            self.status.configure(text=err, text_color=RED)
+            return
+        provider = self._provider
+        missing = checkin.onepush_required_missing(provider, params)
+        if missing:
+            self.status.configure(text=f"缺少必填参数：{', '.join(missing)}", text_color=RED)
+            return
+        self.test_btn.configure(state="disabled")
+        self.save_btn.configure(state="disabled")
+        self.status.configure(text="正在发送测试推送...", text_color=GRAY)
+
+        def worker():
+            ok, detail = checkin.onepush_send(
+                provider, params, "📬 DailyCheckIn 测试推送",
+                f"推送通道 {provider} 工作正常！\n{datetime.now():%Y-%m-%d %H:%M:%S}")
+            checkin.log.info(f"测试推送{'成功' if ok else '失败'}（{provider}）"
+                             + ("" if ok else f"：{detail}"))
+
+            def ui():
+                self.test_btn.configure(state="normal")
+                self.save_btn.configure(state="normal")
+                if ok:
+                    self.status.configure(text="✅ 测试推送已发送，请查看手机", text_color=GREEN)
+                else:
+                    self.status.configure(text=f"❌ 测试失败：{detail}", text_color=RED)
+
+            self.app.ui_queue.put(ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def do_save(self):
+        params, err = self._gather_params()
+        if err:
+            self.status.configure(text=err, text_color=RED)
+            return
+        enabled = bool(self.enabled_switch.get())
+        checkin.CONFIG["onepush"] = {"enabled": enabled, "provider": self._provider,
+                                     "params": params}
+        save_config(checkin.CONFIG)
+        name = self.PROVIDER_NAMES.get(self._provider, self._provider)
+        checkin.log.info(f"推送设置已保存：{'已启用' if enabled else '已停用'} · {name}")
+        self.status.configure(text="✅ 已保存", text_color=GREEN)
+        self.after(900, self.destroy)
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -413,8 +668,11 @@ class App(ctk.CTk):
         ctk.CTkButton(right, text="⚙️ 打开配置文件", height=40,
                       fg_color="#374151", hover_color="#4B5563",
                       command=lambda: self._open(CONFIG_FILE)).grid(row=6, column=0, sticky="ew", pady=6)
+        ctk.CTkButton(right, text="📬 推送设置", height=40,
+                      fg_color="#374151", hover_color="#4B5563",
+                      command=lambda: PushConfigDialog(self, self)).grid(row=7, column=0, sticky="ew", pady=6)
 
-        right.grid_rowconfigure(7, weight=1)
+        right.grid_rowconfigure(8, weight=1)
 
     def _build_log(self):
         log_frame = ctk.CTkFrame(self, corner_radius=14, height=190)

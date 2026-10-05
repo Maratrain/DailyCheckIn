@@ -188,6 +188,11 @@ def load_config() -> dict:
             "enabled": True,
             "cookie": "",
         },
+        "onepush": {
+            "enabled": False,
+            "provider": "bark",
+            "params": {},
+        },
     }
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:
@@ -1288,6 +1293,78 @@ def weibo_run() -> bool:
     return all_ok
 
 
+# ════════════════════════════ 结果推送 ════════════════════════════
+# 通过 OnePush 把签到完成状态推送到手机（Bark / Server酱 / Telegram / 企业微信 / 钉钉等）。
+# 通道与参数在 config.json 的 onepush 节点配置；推送失败只记日志，不影响签到本身。
+
+def onepush_required_missing(provider: str, params: dict) -> list:
+    """通道必需参数中用户尚未提供的项（title/content 由程序传入，不算在内）"""
+    try:
+        from onepush import get_notifier
+        notifier = get_notifier(provider)
+    except Exception:
+        return []
+    return [p for p in notifier.params.get("required", [])
+            if p not in ("title", "content") and p not in params]
+
+
+def onepush_send(provider: str, params: dict, title: str, content: str) -> tuple:
+    """调用 OnePush 发送一条推送，返回 (是否成功, 说明)。供结果推送与 GUI 测试共用。"""
+    try:
+        from onepush import notify
+    except ImportError:
+        return False, "未安装 onepush 库（pip install onepush）"
+    try:
+        resp = notify(provider, title=title, content=content, **params)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    # 常规通道返回 requests.Response；smtp 等返回 dict（空 dict 表示全部送达）
+    if isinstance(resp, dict):
+        return (not resp), (f"未送达：{resp}" if resp else "已提交发送")
+    ok = resp is not None and getattr(resp, "ok", False)
+    detail = (f"HTTP {resp.status_code} {(resp.text or '')[:120]}"
+              if resp is not None else "请求无响应")
+    return ok, detail
+
+
+def onepush_push(results: list) -> None:
+    op = CONFIG.get("onepush") or {}
+    if not op.get("enabled"):
+        return
+    provider = str(op.get("provider") or "").strip()
+    if not provider:
+        log.warning("OnePush 推送已启用但未配置 provider，跳过")
+        return
+    try:
+        from onepush import get_notifier, all_providers
+        get_notifier(provider)
+    except ImportError:
+        log.warning("未安装 onepush 库，无法推送（pip install onepush）")
+        return
+    except Exception:
+        log.warning(f"OnePush 通道「{provider}」不存在，可用通道：{', '.join(all_providers())}")
+        return
+    params = op.get("params") or {}
+    missing = onepush_required_missing(provider, params)
+    if missing:
+        log.warning(f"OnePush 推送已跳过：通道 {provider} 缺少必需参数 "
+                    f"{', '.join(missing)}（请在 config.json 的 onepush.params 中补齐）")
+        return
+
+    all_ok = all(ok for _, ok in results)
+    title = "✅ 每日签到全部完成" if all_ok else "⚠️ 每日签到存在失败项"
+    content = "\n".join(
+        f"{'✅' if ok else '❌'} {name}：{'完成' if ok else '存在失败项，详见日志'}"
+        for name, ok in results
+    ) + f"\n🕒 {datetime.now():%Y-%m-%d %H:%M:%S}"
+
+    ok, detail = onepush_send(provider, params, title, content)
+    if ok:
+        log.info(f"OnePush 推送成功（{provider}）")
+    else:
+        log.warning(f"OnePush 推送失败（{provider}）：{detail}")
+
+
 # ════════════════════════════ 主流程 ════════════════════════════
 
 def cmd_run() -> int:
@@ -1299,6 +1376,7 @@ def cmd_run() -> int:
     log.info("══════════════ 执行汇总 ══════════════")
     for name, ok in results:
         log.info(f"  {name}：{'完成' if ok else '存在失败项，详见上方日志'}")
+    onepush_push(results)
     return 0 if all(ok for _, ok in results) else 1
 
 
