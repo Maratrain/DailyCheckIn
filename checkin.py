@@ -682,8 +682,8 @@ def mi_ensure_web_auth(m: dict) -> bool:
     return mi_roles_call(m).get("retcode") == 0
 
 
-def mi_bbs_checkin(m: dict) -> bool:
-    """米游币打卡：逐个分区调用签到接口"""
+def mi_bbs_checkin(m: dict) -> tuple:
+    """米游币打卡：逐个分区调用签到接口，返回 (是否全部成功, 失败明细)"""
     # 先查任务状态：米游币已拿满说明含打卡在内的任务全部完成，直接跳过，
     # 避免无谓的打卡请求触发风控验证码
     tasks = http_request("GET", MI_TASKS_URL,
@@ -697,9 +697,10 @@ def mi_bbs_checkin(m: dict) -> bool:
         if t.get("can_get_points") == 0:
             log.info(f"米游币：今日已拿满（已获得 {t.get('already_received_points', '?')}，"
                      f"共 {t.get('total_points', '?')}），打卡跳过")
-            return True
+            return True, []
 
     all_ok = True
+    errors = []
     for gid in m["bbs_gids"]:
         name = MI_BBS_PARTITIONS.get(str(gid), f"分区{gid}")
         log.info(f"正在米游币打卡 [{name}]...")
@@ -713,26 +714,29 @@ def mi_bbs_checkin(m: dict) -> bool:
             log.info(f"米游币打卡 [{name}]：今日已打卡")
         elif code == 1034:
             log.warning(f"米游币打卡 [{name}]：触发风控验证码，今天请在 App 里手动打卡一次")
+            errors.append(f"米游币打卡 [{name}]：触发风控验证码，请在 App 里手动打卡")
             all_ok = False
         elif code == -100:
             log.error(f"米游币打卡 [{name}]：stoken 无权限或已失效"
                       f"（扫码获取的 token 已被米哈游限制权限，请用短信验证码方式重新登录："
                       f"python checkin.py login）")
-            return False
+            return False, [f"米游币打卡 [{name}]：stoken 无权限或已失效，请重新登录"]
         else:
             msg = data.get("message", "")
             if "已" in msg:
                 log.info(f"米游币打卡 [{name}]：今日已打卡")
             else:
                 log.warning(f"米游币打卡 [{name}]：失败（{code} {msg}）")
+                errors.append(f"米游币打卡 [{name}]：失败（{code} {msg}）")
                 all_ok = False
         time.sleep(random.randint(2, 6))
-    return all_ok
+    return all_ok, errors
 
 
-def mi_game_sign(m: dict) -> bool:
-    """游戏签到领福利：原神/星穹铁道/绝区零/崩坏3"""
+def mi_game_sign(m: dict) -> tuple:
+    """游戏签到领福利：原神/星穹铁道/绝区零/崩坏3，返回 (是否全部成功, 失败明细)"""
     all_ok = True
+    errors = []
     for game_key in m["game_sign"]:
         game = MI_GAMES.get(game_key)
         if not game:
@@ -751,6 +755,8 @@ def mi_game_sign(m: dict) -> bool:
         if roles_data.get("retcode") != 0:
             log.warning(f"{name}：获取账号角色列表失败（{roles_data.get('retcode')} "
                         f"{roles_data.get('message')}），可能未绑定该游戏")
+            errors.append(f"{name}：获取账号角色列表失败（{roles_data.get('retcode')} "
+                          f"{roles_data.get('message')}），可能未绑定该游戏")
             all_ok = False
             continue
         roles = roles_data.get("data", {}).get("list", [])
@@ -776,6 +782,7 @@ def mi_game_sign(m: dict) -> bool:
                                         "region": region, "uid": uid})
             if info.get("retcode") != 0:
                 log.warning(f"{name} [{nick}]：获取签到信息失败（{info.get('message')}）")
+                errors.append(f"{name} [{nick}]：获取签到信息失败（{info.get('message')}）")
                 all_ok = False
                 continue
             info_data = info["data"]
@@ -806,20 +813,23 @@ def mi_game_sign(m: dict) -> bool:
                     log.info(f"{name} [{nick}]：今日已签到")
                 else:
                     log.warning(f"{name} [{nick}]：签到失败（{sign.get('retcode')} {msg}）")
+                    errors.append(f"{name} [{nick}]：签到失败（{sign.get('retcode')} {msg}）")
                     all_ok = False
-    return all_ok
+    return all_ok, errors
 
 
-def mihoyo_run() -> bool:
+def mihoyo_run() -> tuple:
+    """米游社模块入口：米游币打卡 + 游戏签到，返回 (是否全部成功, 失败明细)"""
     m = CONFIG["mihoyo"]
     if not m["enabled"]:
         log.info("米游社模块未启用，跳过")
-        return True
+        return True, []
     if not m["stoken"]:
         log.warning("米游社尚未登录（缺少 stoken），请先执行：python checkin.py login")
-        return False
+        return False, ["尚未登录（缺少 stoken），请先执行登录"]
 
     ok = True
+    errors = []
     fp_bbs = ",".join(sorted(str(g) for g in m["bbs_gids"]))
     fp_game = ",".join(sorted(m["game_sign"]))
     # 米游币打卡只依赖 stoken，放在最前且不依赖网页端登录态
@@ -827,22 +837,27 @@ def mihoyo_run() -> bool:
         if is_done("mihoyo_bbs", fp_bbs):
             log.info("米游币打卡：今日已完成（本地记录），跳过")
         else:
-            if mi_bbs_checkin(m):
+            bbs_ok, bbs_errors = mi_bbs_checkin(m)
+            if bbs_ok:
                 mark_done("mihoyo_bbs", fp_bbs)
             else:
                 ok = False
+                errors.extend(bbs_errors)
     if mi_ensure_web_auth(m):
         if is_done("mihoyo_game", fp_game):
             log.info("游戏签到：今日已完成（本地记录），跳过")
         else:
-            if mi_game_sign(m):
+            game_ok, game_errors = mi_game_sign(m)
+            if game_ok:
                 mark_done("mihoyo_game", fp_game)
             else:
                 ok = False
+                errors.extend(game_errors)
     else:
         log.error("米游社网页端登录态不可用，本次跳过游戏签到（cookie_token 会在下次运行时自动重试）")
         ok = False
-    return ok
+        errors.append("网页端登录态不可用，本次游戏签到未执行")
+    return ok, errors
 
 
 # ════════════════════════════ 库街区部分 ════════════════════════════
@@ -940,20 +955,21 @@ def kuro_sms_login() -> None:
     (log.info if ok else log.error)(msg)
 
 
-def kuro_sign() -> bool:
+def kuro_sign() -> tuple:
+    """库街区每日补给签到，返回 (是否全部成功, 失败明细)"""
     k = CONFIG["kuro"]
     if not k["enabled"]:
         log.info("库街区模块未启用，跳过")
-        return True
+        return True, []
     if not k["token"]:
         log.warning("库街区尚未登录（缺少 token），请先执行：python checkin.py login")
-        return False
+        return False, ["尚未登录（缺少 token），请先执行登录"]
 
     log.info("正在检查库街区登录态...")
     mine = kuro_request(KURO_MINE_URL, kuro_user_headers(k), {})
     if mine.get("code") == 220:
         log.error("库街区 token 已过期，请重新执行：python checkin.py login")
-        return False
+        return False, ["token 已过期，请重新登录"]
     user_id = k["user_id"]
     if mine.get("code") == 200 and mine.get("data", {}).get("mine", {}).get("userId"):
         user_id = str(mine["data"]["mine"]["userId"])
@@ -962,14 +978,15 @@ def kuro_sign() -> bool:
             save_config(CONFIG)
     if not user_id:
         log.error("库街区：无法获取用户 ID，请重新登录")
-        return False
+        return False, ["无法获取用户 ID，请重新登录"]
 
     all_ok = True
+    errors = []
     current_month = datetime.now().strftime("%m")
     fp = ",".join(sorted(k["games"]))
     if is_done("kuro", fp):
         log.info("库街区每日补给：今日已完成（本地记录），跳过")
-        return True
+        return True, []
     for game_key in k["games"]:
         game = KURO_GAMES.get(game_key)
         if not game:
@@ -1012,17 +1029,21 @@ def kuro_sign() -> bool:
                 log.info(f"库街区 {name} [{role_name}]：今日已签到")
             elif code == 220:
                 log.error("库街区 token 已过期，请重新执行：python checkin.py login")
-                return False
+                errors.append(f"{name} [{role_name}]：token 已过期，请重新登录")
+                return False, errors
             elif code == 1513:
                 log.warning(f"库街区 {name} [{role_name}]：用户信息异常，请检查账号绑定")
+                errors.append(f"{name} [{role_name}]：用户信息异常，请检查账号绑定")
                 all_ok = False
             else:
                 log.warning(f"库街区 {name} [{role_name}]：签到失败"
                             f"（{code} {result.get('message')}）")
+                errors.append(f"{name} [{role_name}]：签到失败"
+                              f"（{code} {result.get('message')}）")
                 all_ok = False
     if all_ok:
         mark_done("kuro", fp)
-    return all_ok
+    return all_ok, errors
 
 
 # ════════════════════════════ 微博超话部分 ════════════════════════════
@@ -1243,37 +1264,38 @@ def wb_cookie_login() -> None:
     (log.info if ok else log.error)(msg)
 
 
-def weibo_run() -> bool:
-    """微博超话签到：自动签到所有关注且可签的超话（含原神超话）"""
+def weibo_run() -> tuple:
+    """微博超话签到：自动签到所有关注且可签的超话（含原神超话），返回 (是否全部成功, 失败明细)"""
     w = CONFIG["weibo"]
     if not w["enabled"]:
         log.info("微博超话模块未启用，跳过")
-        return True
+        return True, []
     if not w["cookie"]:
         log.warning("微博尚未登录（缺少 Cookie），请先执行：python checkin.py login")
-        return False
+        return False, ["尚未登录（缺少 Cookie），请先执行登录"]
     if is_done("weibo"):
         log.info("微博超话：今日已完成（本地记录），跳过")
-        return True
+        return True, []
 
     log.info("正在检查微博登录态...")
     ok, who = wb_verify_login(w)
     if not ok:
         log.error("微博 Cookie 已失效，请重新登录（python checkin.py login 或图形界面）")
-        return False
+        return False, ["Cookie 已失效，请重新登录"]
     log.info(f"微博登录有效：{who}")
 
     try:
         topics = wb_list_topics(w)
     except Exception as e:
         log.error(f"获取超话列表失败：{e}")
-        return False
+        return False, [f"获取超话列表失败：{e}"]
 
     todo = [t for t in topics if t["status"] == "available"]
     already = [t for t in topics if t["status"] == "signed"]
     log.info(f"共关注 {len(topics)} 个超话：待签 {len(todo)}，今日已签 {len(already)}")
 
     all_ok, success_count = True, 0
+    errors = []
     for t in todo:
         try:
             status, msg = wb_do_checkin(w, t["scheme"])
@@ -1282,15 +1304,17 @@ def weibo_run() -> bool:
                 success_count += status == "success"
             else:
                 log.warning(f"超话签到 [{t['name']}]：失败（{msg}）")
+                errors.append(f"超话签到 [{t['name']}]：失败（{msg}）")
                 all_ok = False
         except Exception as e:
             log.warning(f"超话签到 [{t['name']}]：异常（{e}）")
+            errors.append(f"超话签到 [{t['name']}]：异常（{e}）")
             all_ok = False
         time.sleep(random.randint(2, 5))
     log.info(f"微博超话：本次成功 {success_count}，之前已签 {len(already)}")
     if all_ok:
         mark_done("weibo")
-    return all_ok
+    return all_ok, errors
 
 
 # ════════════════════════════ 结果推送 ════════════════════════════
@@ -1327,6 +1351,22 @@ def onepush_send(provider: str, params: dict, title: str, content: str) -> tuple
     return ok, detail
 
 
+def onepush_content(results: list) -> str:
+    """把各模块结果渲染成推送正文；失败明细逐条列出，超 5 条截断防止推送内容过长"""
+    lines = []
+    for name, ok, errors in results:
+        if ok:
+            lines.append(f"✅ {name}：完成")
+            continue
+        errors = [e for e in errors if e] or ["失败原因未知，详见日志"]
+        lines.append(f"❌ {name}：{len(errors)} 项失败")
+        lines.extend(f"　· {e}" for e in errors[:5])
+        if len(errors) > 5:
+            lines.append(f"　· …其余 {len(errors) - 5} 项详见日志")
+    lines.append(f"🕒 {datetime.now():%Y-%m-%d %H:%M:%S}")
+    return "\n".join(lines)
+
+
 def onepush_push(results: list) -> None:
     op = CONFIG.get("onepush") or {}
     if not op.get("enabled"):
@@ -1351,12 +1391,9 @@ def onepush_push(results: list) -> None:
                     f"{', '.join(missing)}（请在 config.json 的 onepush.params 中补齐）")
         return
 
-    all_ok = all(ok for _, ok in results)
+    all_ok = all(ok for _, ok, _ in results)
     title = "✅ 每日签到全部完成" if all_ok else "⚠️ 每日签到存在失败项"
-    content = "\n".join(
-        f"{'✅' if ok else '❌'} {name}：{'完成' if ok else '存在失败项，详见日志'}"
-        for name, ok in results
-    ) + f"\n🕒 {datetime.now():%Y-%m-%d %H:%M:%S}"
+    content = onepush_content(results)
 
     ok, detail = onepush_send(provider, params, title, content)
     if ok:
@@ -1370,14 +1407,14 @@ def onepush_push(results: list) -> None:
 def cmd_run() -> int:
     log.info(f"════ 每日打卡签到开始（{datetime.now():%Y-%m-%d %H:%M:%S}）════")
     results = []
-    results.append(("米游社", mihoyo_run()))
-    results.append(("库街区", kuro_sign()))
-    results.append(("微博超话", weibo_run()))
+    for name, run in (("米游社", mihoyo_run), ("库街区", kuro_sign), ("微博超话", weibo_run)):
+        ok, errors = run()
+        results.append((name, ok, errors))
     log.info("══════════════ 执行汇总 ══════════════")
-    for name, ok in results:
+    for name, ok, _ in results:
         log.info(f"  {name}：{'完成' if ok else '存在失败项，详见上方日志'}")
     onepush_push(results)
-    return 0 if all(ok for _, ok in results) else 1
+    return 0 if all(ok for _, ok, _ in results) else 1
 
 
 def cmd_test() -> int:
